@@ -28,6 +28,7 @@
 #include "pinoutOutpost.h"
 #include "lcd.h"
 #include "doom/doomstat.h"      // brightnessLevel
+#include "badge_image.h"        // static name-badge (296x128, fb_accum layout)
 
 #define EPD_SPI         spi1
 #define EPD_BAUD        20000000
@@ -73,7 +74,15 @@ static const uint8_t wf_partial[159] = {
 // speed/contrast trade (see epaper/README.md in the badge repo)
 #define WF_TPA          2       // group 0 drive frames
 #define WF_FRAME_RATE   0x44
-#define WF_GROUPS       1       // drop group 1 hold pulse + group 2
+#define WF_GROUPS       3       // keep both hold pulses: 9.4fps "milestone" contrast
+
+// Post-process for clarity: linear contrast stretch around mid-gray applied to
+// luma BEFORE the ordered dither. Ordered (Bayer) dither is temporally stable,
+// so static pixels stay identical frame-to-frame (no shimmer/extra ghosting) --
+// unlike error diffusion. gain = EINK_CONTRAST_NUM / (1 << EINK_CONTRAST_SHIFT).
+#define EINK_CONTRAST_NUM   3
+#define EINK_CONTRAST_SHIFT 1   // 3>>1 = 1.5x
+#define EINK_LUMA_MID       124 // midpoint of the 0..248 luma range
 
 static uint8_t fb_accum[EPD_BUFLEN];    // dither target (bit 1 = white)
 static uint8_t fb_sent[EPD_BUFLEN];     // snapshot on the panel / in old RAM
@@ -98,6 +107,14 @@ extern void fill_scanlines(void);
 
 // debug counters, printed from the core-0 input poll
 volatile uint32_t eink_lines_pumped, eink_frames_pushed;
+
+// set by the core-0 input poll (hold U+R+A+B >3s); serviced in epd_poll on
+// core 1: do one full-strength panel reset to wipe accumulated ghosting.
+volatile uint8_t eink_clear_request;
+
+// name-badge takeover ("kill Doom"): 1 = show the static badge, 0 = play Doom.
+// Toggled by the core-0 input poll (hold L+R+A+B >3s); serviced in epd_poll.
+volatile uint8_t eink_badge_mode;
 
 // verify the flashed WHX region before anything parses it (called from i_main)
 void outpost_wad_check(void) {
@@ -222,13 +239,80 @@ static void epd_base_white(void) {
 
 // ---- frame push state machine ------------------------------------------
 
+// one full-strength refresh to `buf` (factory LUT, sets only new RAM like the
+// reference display_full -- setting old==new makes the controller skip
+// unchanged pixels, which leaves ghosts).
+static void epd_full_refresh(const uint8_t *buf) {
+    epd_set_window_full();
+    epd_cmd(0x24, buf, EPD_BUFLEN);
+    epd_cmd1(0x22, 0xF7);
+    epd_cmd(0x20, NULL, 0);
+    epd_wait();
+}
+
+// strong two-pass clear (drive every pixel black, then white) to shake out
+// accumulated ghosting; leaves the panel white with old RAM seeded white.
+// Caller must have run epd_init_regs() first (factory LUT).
+static void epd_clear_panel(void) {
+    memset(fb_sent, 0x00, EPD_BUFLEN); epd_full_refresh(fb_sent);   // all black
+    memset(fb_sent, 0xFF, EPD_BUFLEN); epd_full_refresh(fb_sent);   // all white
+    memset(fb_accum, 0xFF, EPD_BUFLEN);
+    epd_set_window_full();
+    epd_cmd(0x26, fb_sent, EPD_BUFLEN);                             // old RAM = white
+}
+
+// "kill Doom": clear the panel hard, then draw the static badge.
+static void epd_show_badge(void) {
+    epd_init_regs();                    // SW reset -> factory LUT from OTP
+    epd_clear_panel();                  // wipe Doom's ghost (incl. the status bar)
+    memcpy(fb_accum, badge_image, EPD_BUFLEN);
+    memcpy(fb_sent,  badge_image, EPD_BUFLEN);
+    epd_full_refresh(fb_sent);
+    epd_set_window_full();
+    epd_cmd(0x26, fb_sent, EPD_BUFLEN); // old RAM = badge
+}
+
+// leaving badge mode: clear the badge off the panel, then re-arm fast partial
+// so Doom redraws onto a clean white field.
+static void epd_resume_doom(void) {
+    epd_init_regs();
+    epd_clear_panel();                  // wipe the badge (else it ghosts under Doom)
+    epd_arm_partial();                  // charge pump up, short LUT reloaded
+}
+
 static void __not_in_flash_func(epd_poll)(void) {
+    static uint8_t badge_shown;
+    if (eink_badge_mode) {              // "kill Doom": show the static badge, hold it
+        if (!badge_shown) {
+            if (epd_state == EPD_UPDATING) { if (epd_busy()) return; epd_state = EPD_IDLE; }
+            epd_show_badge();
+            badge_shown = 1;
+        }
+        return;
+    }
+    if (badge_shown) {                  // leaving badge mode -> resume Doom
+        epd_resume_doom();
+        epd_state = EPD_IDLE;
+        frame_dirty = false;
+        badge_shown = 0;
+    }
     if (epd_state == EPD_UPDATING) {
         if (epd_busy()) return;
         // update done: bring old RAM in sync so static pixels stay undriven
         epd_set_window_full();
         epd_cmd(0x26, fb_sent, EPD_BUFLEN);
         epd_state = EPD_IDLE;
+    }
+    if (epd_state == EPD_IDLE && eink_clear_request) {
+        eink_clear_request = 0;
+        // manual ghost clear (~2.5s). A full refresh straight after arm_partial()
+        // is weak (the factory LUT was overwritten), so re-init to restore it
+        // first, then re-arm the fast partial path.
+        epd_init_regs();      // SW reset -> factory LUT from OTP
+        epd_base_white();     // full-strength white: wipes ghosts, seeds old RAM
+        epd_arm_partial();    // reload short custom LUT, charge pump back up
+        frame_dirty = false;  // drop stale frame; the pump redraws the live scene
+        return;
     }
     if (epd_state == EPD_IDLE && frame_dirty) {
         frame_dirty = false;
@@ -259,13 +343,16 @@ void dispWaitLine(void) {
 // y: doom scanline 0..199; buf: 320 pixels, 5:5:5 at shifts 11/6/0
 void __not_in_flash_func(dispRenderLine)(uint y, uint16_t *buf, uint32_t width) {
     uint ty = line_target[y < SRC_H ? y : SRC_H - 1];
-    if (ty != 0xFF) {
+    if (!eink_badge_mode && ty != 0xFF) {
         const uint8_t *brow = &bayer4[(ty & 3) * 4];
         int bias = dither_bias;
         for (uint tx = 0; tx < EPD_ROWS; tx++) {
             uint16_t p = buf[xmap[tx]];
             int r = (p >> 11) & 31, g = (p >> 6) & 31, b = p & 31;
             int luma = (r * 77 + g * 151 + b * 28) >> 5;    // 0..248
+            // contrast stretch around mid-gray for a crisper 1-bit image
+            luma = EINK_LUMA_MID +
+                   (((luma - EINK_LUMA_MID) * EINK_CONTRAST_NUM) >> EINK_CONTRAST_SHIFT);
             int t = brow[tx & 3] * 16 + 8;
             // screen x -> panel row 295-x (FLIP_X, matches the badge firmware)
             uint idx = (EPD_ROWS - 1 - tx) * EPD_STRIDE + (ty >> 3);
