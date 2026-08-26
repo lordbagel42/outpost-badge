@@ -36,7 +36,12 @@ REPORT_EVERY = NFRAMES       # report once per wave cycle, so a cycle number on
 
 # (label, tpa, frame_rate, groups, frames);  frames = 0 -> loop forever
 SETTINGS = (
-    ("balanced", 2, 0x44, None, 0),
+    # groups=1 drops LUT group 1, which drives UNCHANGED pixels one way
+    # every frame and never balances them. Three groups gave visibly darker
+    # bands wherever content sat still (see ../README.md). tpa=3 spends the
+    # freed time on drive instead, so this runs at the same 9.4 fps and
+    # looked the same in an A/B test at matched frame rate.
+    ("safe    ", 3, 0x44, 1, 0),
 )
 
 spi = busio.SPI(clock=board.GP14, MOSI=board.GP15)
