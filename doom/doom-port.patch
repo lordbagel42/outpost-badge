@@ -1,3 +1,20 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index bc112c9..e6a7fff 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -55,7 +55,11 @@ endif()
+ if (NOT PICO_SDK_PATH)
+     find_package(SDL2 2.0.1 REQUIRED)
+     find_package(SDL2_mixer 2.0.0 REQUIRED)
+-    find_package(SDL2_net 2.0.0 REQUIRED)
++    find_package(SDL2_net 2.0.0)  # DIAG(outpost): optional; only whd_gen host tool is needed
++    if (NOT TARGET SDL2::net)
++        # stub so the SDL doom targets configure; we only build whd_gen, which doesn't use net
++        add_library(SDL2::net INTERFACE IMPORTED)
++    endif()
+ 
+     # Check for libsamplerate.
+     find_package(samplerate)
 diff --git a/boards/outpost_badge.h b/boards/outpost_badge.h
 new file mode 100644
 index 0000000..25f47f1
@@ -71,14 +88,123 @@ index 0000000..25f47f1
 +#endif
 +
 +#endif
-diff --git a/doom_outpost_full.uf2 b/doom_outpost_full.uf2
-new file mode 100644
-index 0000000..62db71b
-Binary files /dev/null and b/doom_outpost_full.uf2 differ
-diff --git a/doom_outpost_usbdebug.uf2 b/doom_outpost_usbdebug.uf2
-new file mode 100644
-index 0000000..824d983
-Binary files /dev/null and b/doom_outpost_usbdebug.uf2 differ
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 8227e94..e63cca6 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -640,15 +640,15 @@ if (PICO_SDK)
+             NO_USE_FINALE_BUNNY=1
+     )
+     target_compile_definitions(doom_tiny PRIVATE
+-            TINY_WAD_ADDR=0x10040000
+-    )
++            TINY_WAD_ADDR=0x10044000 # was 0x10040000; moved up 16K: the badge_image
++    )                                # pushed code past the old 256K WAD boundary
+     target_link_libraries(doom_tiny PRIVATE tiny_settings)
+     if (HACK_ENABLE_STDIO_USB)
+         # HACK in USB support - we can't be bothered to add our own CDC descriptor and use directly,
+         # so we need to enable the default stdio USB stuff in SDK which requires the default alarm pool
+         pico_enable_stdio_usb(doom_tiny 1)
+         target_compile_definitions(doom_tiny PRIVATE
+-                PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS=-1 # wait for host usb connection at init
++                PICO_STDIO_USB_CONNECT_WAIT_TIMEOUT_MS=0 # boot immediately (standalone); USB still enumerates for reflash/logs
+         )
+         get_target_property(COMPILE_DEFS doom_tiny COMPILE_DEFINITIONS)
+         list(REMOVE_ITEM COMPILE_DEFS PICO_TIME_DEFAULT_ALARM_POOL_DISABLED=1)
+diff --git a/src/doom/r_data_whd.c b/src/doom/r_data_whd.c
+index af2dc3f..2c9566e 100644
+--- a/src/doom/r_data_whd.c
++++ b/src/doom/r_data_whd.c
+@@ -39,6 +39,11 @@
+ #include "r_data.h"
+ #include <assert.h>
+ 
++// DIAG(outpost): fine-grained, USB-flushed progress trace for the R_Init hang
++#include "pico/stdio.h"
++#include "pico/time.h"
++#define RDBG(...) do { printf("[R] " __VA_ARGS__); printf("\n"); stdio_flush(); busy_wait_ms(8); } while(0)
++
+ //
+ // Graphics.
+ // DOOM graphics for walls and sprites
+@@ -190,10 +195,14 @@ framedrawable_t *lookup_masked_texture(int texturenum) {
+ //
+ void R_InitTextures (void)
+ {
++    RDBG("InitTextures: enter");
+     lumpindex_t lump  = W_CheckNumForName("TEXTURE1");
++    RDBG("InitTextures: TEXTURE1 lump=%d", (int)lump);
+     const uint8_t *data = W_CacheLumpNum(lump, PU_STATIC);
++    RDBG("InitTextures: data=%p", (const void *)data);
+     numtextures = data[0] | (data[1] << 8);
+     whd_textures = (const whdtexture_t *)(data + 2);
++    RDBG("InitTextures: numtextures=%d (special=%d)", (int)numtextures, (int)NUM_SPECIAL_TEXTURES);
+     assert(numtextures >= NUM_SPECIAL_TEXTURES);
+ 
+     for (int i=0 ; i< count_of(whd_texturetranslation) ; i++)
+@@ -207,17 +216,22 @@ void R_InitFlats (void)
+ {
+     int		i;
+ 
++    RDBG("InitFlats: enter");
+     firstflat = W_GetNumForName (DEH_String("F_START")) + 1;
+     lumpindex_t lastflat = W_GetNumForName (DEH_String("F_END")) - 1;
+     numflats = lastflat - firstflat + 1;
++    RDBG("InitFlats: firstflat=%d lastflat=%d numflats=%d", (int)firstflat, (int)lastflat, (int)numflats);
+ #if USE_FLAT_MAX_256
+     assert(numflats <= 256);
+ #endif
++    RDBG("InitFlats: lumplen(firstflat-1)=%d expect(%d+%d)", (int)W_LumpLength(firstflat-1), (int)NUM_SPECIAL_FLATS, (int)numflats);
+     assert(W_LumpLength(firstflat-1) == NUM_SPECIAL_FLATS + numflats );
+     whd_specialtoflat = W_CacheLumpNum(firstflat - 1, PU_STATIC);
++    RDBG("InitFlats: cached specialtoflat=%p", (const void *)whd_specialtoflat);
+ 
+     for (i=0 ; i<NUM_SPECIAL_FLATS ; i++)
+         whd_flattranslation[i] = i;
++    RDBG("InitFlats: done");
+ }
+ 
+ 
+@@ -229,19 +243,26 @@ void R_InitFlats (void)
+ //
+ void R_InitSpriteLumps (void)
+ {
++    RDBG("InitSpriteLumps: enter");
+     firstspritelump = W_GetNumForName (DEH_String("S_START")) + 1;
+     lastspritelump = W_GetNumForName (DEH_String("S_END")) - 1;
++    RDBG("InitSpriteLumps: first=%d last=%d", (int)firstspritelump, (int)lastspritelump);
+ 
+     numspritelumps = lastspritelump - firstspritelump + 1;
++    RDBG("InitSpriteLumps: numspritelumps=%d lumplen(first-1)=%d (expect 4x)", (int)numspritelumps, (int)W_LumpLength(firstspritelump-1));
+     assert(4 * numspritelumps == W_LumpLength(firstspritelump-1));
+     whd_sprite_meta = W_CacheLumpNum(firstspritelump-1, PU_STATIC);
++    RDBG("InitSpriteLumps: sprite_meta=%p", (const void *)whd_sprite_meta);
+     whd_sprite_frame_meta = W_CacheLumpNum(lastspritelump+1, PU_STATIC);
++    RDBG("InitSpriteLumps: sprite_frame_meta=%p", (const void *)whd_sprite_frame_meta);
+ 
+     // todo if this is too big we can do away with it and access the patch directly
+     whd_vpatch_numbers = (const uint16_t *) W_CacheLumpName("P_START", PU_STATIC);
++    RDBG("InitSpriteLumps: vpatch_numbers=%p; P_START len=%d expect=%d", (const void *)whd_vpatch_numbers, (int)W_LumpLength(W_GetNumForName("P_START")), (int)(NUM_VPATCHES * 2));
+     if (W_LumpLength(W_GetNumForName("P_START")) != NUM_VPATCHES * 2) {
+         I_Error("whd is out of sync with VPATCH enum"); // make sure whd_gen is up to date with code, and whd is regenerated
+     }
++    RDBG("InitSpriteLumps: done");
+ }
+ 
+ //
+@@ -251,10 +272,12 @@ void R_InitColormaps (void)
+ {
+     int	lump;
+ 
++    RDBG("InitColormaps: enter");
+     // Load in the light tables,
+     //  256 byte align tables.
+     lump = W_GetNumForName(DEH_String("COLORMAP"));
+     colormaps = W_CacheLumpNum(lump, PU_STATIC);
++    RDBG("InitColormaps: colormaps=%p done", (const void *)colormaps);
+ #if PRINT_COLORMAPS
+     int size = W_LumpLength(lump);
+     assert(!(size & 0xff));
 diff --git a/src/i_main.c b/src/i_main.c
 index 22ba5a6..892cbea 100644
 --- a/src/i_main.c
@@ -97,6 +223,19 @@ index 22ba5a6..892cbea 100644
  #if PICO_BUILD
      I_Init();
  #endif
+diff --git a/src/i_system.h b/src/i_system.h
+index 1609526..5871e3e 100644
+--- a/src/i_system.h
++++ b/src/i_system.h
+@@ -58,7 +58,7 @@ extern int8_t at_exit_screen;
+ extern uint8_t *exit_screen_kb_buffer_80;
+ #endif
+ 
+-#if !NO_IERROR || !PICO_ON_DEVICE
++#if 1  // DIAG(outpost): always use the real, message-printing I_Error
+ void I_Error (const char *error, ...) NORETURN PRINTF_ATTR(1, 2);
+ #else
+ #include "pico.h"
 diff --git a/src/pico/CMakeLists.txt b/src/pico/CMakeLists.txt
 index 063b28c..73ca923 100644
 --- a/src/pico/CMakeLists.txt
@@ -143,12 +282,320 @@ index 063b28c..73ca923 100644
  
  add_library(pico_cd INTERFACE)
  if (TARGET tinyusb_host)
+diff --git a/src/pico/badge_image.h b/src/pico/badge_image.h
+new file mode 100644
+index 0000000..a7faf28
+--- /dev/null
++++ b/src/pico/badge_image.h
+@@ -0,0 +1,302 @@
++// Auto-generated name-badge (296x128, eink fb_accum layout).
++// Regenerate: python3 doom/gen_badge.py header
++#pragma once
++#include <stdint.h>
++static const uint8_t badge_image[4736] = {
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,224,31,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,254,31,193,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,249,255,252,127,255,
++    255,255,255,255,255,255,255,255,255,255,255,247,255,255,159,255,
++    255,255,255,255,255,255,255,255,255,255,255,207,255,255,231,255,
++    255,255,255,255,255,255,255,253,255,255,255,159,255,255,243,255,
++    255,255,255,255,255,255,240,252,127,255,255,180,199,255,249,255,
++    255,255,255,255,255,255,136,249,127,255,255,149,17,255,253,255,
++    255,255,255,255,255,255,112,35,191,255,255,34,204,255,254,255,
++    255,255,255,255,255,254,247,223,191,237,255,29,50,127,254,127,
++    255,255,255,255,255,93,255,255,175,255,255,34,68,255,255,127,
++    255,255,255,255,127,127,255,255,23,247,255,181,184,255,255,63,
++    255,255,255,240,128,227,252,255,243,255,255,138,67,255,255,191,
++    255,255,128,7,255,96,96,255,251,255,255,148,163,255,255,191,
++    255,254,127,255,255,194,5,255,249,255,255,203,72,127,255,191,
++    255,253,255,255,255,8,17,255,255,255,255,228,147,127,255,223,
++    255,251,255,255,255,36,75,255,249,255,255,241,108,127,255,223,
++    255,251,255,255,255,1,0,255,251,255,255,252,0,249,255,223,
++    255,251,255,255,255,202,32,255,249,127,255,255,167,253,255,223,
++    255,253,224,31,255,224,63,255,242,127,255,255,255,253,255,223,
++    255,253,224,143,255,224,127,255,241,63,255,255,255,253,255,239,
++    255,253,242,15,249,227,248,31,242,4,31,255,255,254,255,239,
++    255,254,240,25,248,127,244,135,226,0,1,255,255,254,255,239,
++    255,255,124,1,28,63,246,96,8,64,0,127,255,254,255,239,
++    255,255,190,0,124,191,239,6,112,128,0,2,255,254,255,239,
++    255,255,223,1,120,127,207,165,129,0,0,0,15,254,255,239,
++    255,255,239,0,124,255,253,150,68,64,0,0,1,255,255,239,
++    255,255,243,67,255,255,54,36,129,0,0,0,0,63,255,239,
++    255,255,249,199,255,254,167,14,4,64,0,0,0,15,255,239,
++    255,255,254,63,255,241,175,254,1,0,0,0,0,3,255,239,
++    255,255,135,95,248,135,175,255,2,128,0,0,4,65,255,239,
++    255,255,123,79,248,127,159,255,0,32,0,0,0,0,127,207,
++    255,222,224,127,255,15,159,255,0,3,0,0,17,2,63,255,
++    255,254,204,255,255,233,159,252,127,143,224,0,4,0,127,255,
++    255,254,222,127,255,251,255,249,255,223,240,0,1,8,255,255,
++    255,255,94,255,255,249,255,243,255,223,248,0,4,3,255,255,
++    255,255,30,255,255,254,255,231,255,159,248,0,0,7,255,255,
++    255,255,253,255,255,253,255,207,255,247,248,0,0,31,255,255,
++    255,255,253,255,255,254,191,223,255,159,252,0,0,63,255,207,
++    255,255,254,255,255,255,255,159,255,223,252,0,0,127,255,255,
++    255,255,254,255,255,253,191,223,255,206,248,0,0,255,255,239,
++    255,255,254,254,255,243,247,223,255,231,248,0,1,255,255,143,
++    255,255,254,127,47,15,243,223,255,243,240,0,3,255,255,255,
++    255,255,252,127,224,246,255,223,255,248,192,0,3,255,255,255,
++    255,255,252,63,251,14,255,191,207,255,0,0,7,255,255,255,
++    255,255,249,191,249,68,255,63,227,255,0,0,15,255,255,255,
++    255,255,250,31,254,227,255,191,251,255,128,0,31,255,255,255,
++    255,255,249,207,254,255,255,191,255,255,0,0,63,255,255,255,
++    255,255,242,39,254,255,255,191,255,255,32,0,127,255,255,255,
++    255,255,241,211,254,255,255,191,255,255,8,0,127,255,255,255,
++    255,255,246,35,255,62,255,223,255,255,0,0,255,255,255,255,
++    255,255,240,221,255,129,255,143,255,254,0,0,255,255,255,255,
++    255,255,231,32,255,223,255,111,255,252,0,1,255,255,255,255,
++    255,255,200,206,127,207,254,231,255,252,0,1,255,255,255,243,
++    255,255,159,48,127,227,253,243,255,248,64,1,255,255,255,239,
++    255,255,190,0,31,251,249,220,255,224,0,1,255,255,255,239,
++    255,255,126,16,39,248,193,254,29,0,0,3,255,255,255,255,
++    255,255,124,64,3,254,12,253,224,12,0,1,255,255,255,255,
++    255,255,121,0,77,236,208,255,254,6,0,3,255,255,255,207,
++    255,254,240,3,158,238,38,63,252,7,0,1,255,255,255,239,
++    255,254,240,12,62,199,89,31,240,7,128,1,255,255,255,239,
++    255,254,251,240,248,192,32,71,0,7,192,1,255,255,255,239,
++    255,254,255,227,248,55,71,32,0,7,224,38,255,255,255,207,
++    255,255,63,15,255,240,159,136,0,7,240,14,127,255,255,223,
++    255,255,192,255,255,252,15,152,0,15,240,159,63,255,255,63,
++    255,255,255,255,255,255,135,240,0,15,248,63,191,255,254,127,
++    255,255,255,255,255,255,255,248,0,15,248,127,207,255,254,255,
++    255,255,255,255,255,255,255,248,0,31,253,255,242,255,249,255,
++    255,255,255,255,255,255,255,248,0,31,253,255,253,31,251,255,
++    255,255,255,255,255,255,255,252,0,63,251,255,255,127,247,255,
++    255,255,255,255,255,255,255,254,0,127,247,255,252,127,239,255,
++    255,255,255,255,255,255,255,255,0,255,231,255,249,31,223,255,
++    255,255,255,255,255,255,255,255,239,255,239,255,242,99,159,255,
++    255,255,255,255,255,255,255,255,255,255,239,255,229,151,159,255,
++    255,255,255,255,255,255,255,255,255,255,207,255,202,105,111,255,
++    255,255,255,255,255,255,255,255,255,255,223,255,202,150,111,255,
++    255,255,255,255,255,255,255,255,255,255,223,255,209,40,239,255,
++    255,255,255,255,255,255,255,255,255,255,223,255,206,148,247,255,
++    255,255,255,255,255,255,255,255,255,255,223,255,209,9,247,255,
++    255,255,255,255,255,255,255,255,255,255,223,255,201,99,239,255,
++    255,255,255,255,255,255,255,255,255,255,223,255,224,135,239,255,
++    255,255,255,255,255,255,255,255,255,255,223,255,248,31,223,255,
++    255,255,255,255,255,255,255,255,255,255,223,255,255,255,159,255,
++    255,255,255,255,255,255,255,255,255,255,223,255,255,255,63,255,
++    255,255,255,255,255,255,255,255,255,255,223,255,255,255,127,255,
++    255,255,255,255,255,255,255,255,255,255,239,255,255,254,255,255,
++    255,255,255,255,255,255,255,255,255,255,231,255,255,252,255,255,
++    255,255,255,255,255,255,255,255,255,255,243,255,255,253,255,255,
++    255,255,255,255,255,255,255,255,255,255,252,255,255,251,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,63,255,243,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,192,159,247,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,63,239,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,127,239,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,254,255,223,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,253,255,223,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,253,247,191,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,251,239,191,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,243,99,127,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,247,75,127,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,247,198,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,246,126,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,247,213,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,247,187,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,249,227,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,252,31,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,254,64,160,0,127,255,
++    255,255,143,255,255,255,255,255,255,255,250,163,80,16,63,255,
++    255,255,9,255,255,255,255,255,255,255,251,4,8,102,63,255,
++    255,254,8,255,255,255,255,207,255,255,216,88,164,137,63,255,
++    255,252,8,255,255,255,255,135,255,255,217,83,240,125,31,255,
++    255,252,72,127,255,255,255,3,255,255,217,25,244,65,31,255,
++    255,252,76,127,255,255,254,1,255,255,249,44,8,126,15,255,
++    255,252,76,127,255,255,254,0,255,255,240,139,250,46,143,255,
++    255,252,8,127,255,255,248,0,127,255,240,132,33,40,143,255,
++    255,254,0,255,255,255,248,0,127,255,240,162,68,191,71,255,
++    255,254,0,255,255,255,240,0,63,255,240,133,85,16,71,255,
++    255,255,1,255,255,255,248,0,31,255,224,68,126,23,131,255,
++    255,255,255,255,255,255,243,0,15,255,224,85,129,159,163,255,
++    255,255,199,255,255,255,251,192,7,255,224,70,0,8,35,255,
++    255,254,0,255,255,255,243,224,7,255,224,66,126,207,209,255,
++    255,254,0,255,255,255,251,224,7,255,192,42,126,15,193,255,
++    255,252,0,127,255,255,243,224,7,255,192,35,45,133,48,255,
++    255,252,56,127,255,255,251,224,7,255,192,42,82,5,64,255,
++    255,252,124,127,255,255,243,240,7,255,192,33,36,0,0,255,
++    255,252,124,127,255,255,243,248,7,255,192,29,9,98,170,255,
++    255,254,56,255,255,255,227,254,7,255,192,58,246,223,223,127,
++    255,252,0,7,255,255,195,255,135,255,192,16,0,19,156,255,
++    255,252,0,7,255,255,195,255,199,255,192,39,255,224,0,255,
++    255,252,0,7,255,255,131,255,199,255,192,32,68,61,93,255,
++    255,252,0,7,255,255,131,239,199,255,192,96,0,32,195,255,
++    255,255,255,255,255,255,129,227,199,255,192,47,255,229,241,255,
++    255,255,255,255,255,255,128,96,199,255,224,79,30,2,3,255,
++    255,254,219,127,255,255,0,32,71,255,224,79,30,117,111,255,
++    255,252,0,127,255,255,131,0,7,255,224,128,0,8,11,255,
++    255,252,0,127,255,255,131,192,7,255,240,125,170,229,167,255,
++    255,252,0,127,255,255,131,144,7,255,240,194,127,136,71,255,
++    255,254,208,255,255,255,131,216,7,255,240,128,127,82,159,255,
++    255,255,252,255,255,255,3,156,7,255,248,158,127,165,47,255,
++    255,255,252,127,255,255,131,223,7,255,240,0,1,8,15,255,
++    255,253,32,127,255,255,3,159,199,255,217,246,218,49,255,255,
++    255,252,0,127,255,255,3,255,199,255,217,137,39,66,31,255,
++    255,252,0,255,255,255,3,255,199,255,217,0,1,28,191,255,
++    255,252,1,255,255,255,3,255,199,255,250,127,242,81,63,255,
++    255,255,255,255,255,255,3,255,199,255,252,17,2,166,63,255,
++    255,255,255,255,255,255,3,255,199,255,254,0,12,8,127,255,
++    255,240,255,127,255,255,3,255,199,255,255,255,255,255,255,255,
++    255,224,60,127,255,255,3,251,199,255,255,255,255,255,255,255,
++    255,224,48,127,255,255,0,251,199,255,255,255,255,255,255,255,
++    255,192,0,127,255,255,128,59,199,255,255,255,255,255,255,255,
++    255,195,0,255,255,255,3,27,199,255,255,255,255,255,255,255,
++    255,199,3,255,255,255,131,131,199,255,255,255,255,255,255,255,
++    255,199,7,255,255,255,131,227,199,255,255,255,255,255,255,255,
++    255,199,31,255,255,255,131,240,199,255,255,255,255,255,255,255,
++    255,192,0,127,255,255,131,252,7,255,255,255,255,255,255,255,
++    255,192,0,127,255,255,131,255,7,255,255,255,255,255,255,255,
++    255,192,0,127,255,255,131,255,135,255,255,255,255,255,255,255,
++    255,192,0,127,255,255,131,255,199,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,131,255,199,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,131,239,199,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,179,247,199,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,131,255,199,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,35,255,199,255,255,255,255,255,255,255,
++    255,255,255,255,255,254,99,255,199,255,255,255,255,255,255,255,
++    255,255,128,127,255,254,32,255,199,255,255,255,255,255,255,255,
++    255,254,0,127,255,252,32,127,199,255,255,255,255,255,255,255,
++    255,252,0,127,255,249,50,31,199,255,255,255,255,255,255,255,
++    255,252,0,127,255,255,35,143,199,255,255,255,159,255,255,255,
++    255,252,63,255,255,255,35,195,199,255,255,255,159,255,255,255,
++    255,252,127,255,255,255,35,240,199,255,255,255,207,255,255,255,
++    255,254,127,255,255,255,35,248,71,255,255,255,135,255,255,255,
++    255,252,0,127,255,254,35,248,7,255,255,255,131,255,255,255,
++    255,252,0,127,255,255,35,248,7,255,255,207,193,255,255,255,
++    255,252,0,127,255,254,35,184,7,255,255,195,129,255,255,255,
++    255,252,0,127,255,254,3,184,7,255,255,225,128,255,255,255,
++    255,255,255,255,255,254,35,184,7,255,255,224,0,127,255,255,
++    255,255,143,255,255,254,3,248,7,255,255,240,0,63,255,255,
++    255,255,9,255,255,254,3,248,7,255,255,240,0,63,255,255,
++    255,254,8,255,255,254,3,252,7,255,255,248,0,31,255,255,
++    255,252,8,255,255,255,3,255,7,255,255,248,0,15,255,255,
++    255,252,72,127,255,254,0,255,199,255,255,252,3,135,255,255,
++    255,252,76,127,255,255,0,127,199,255,255,252,54,199,255,255,
++    255,252,76,127,255,255,3,31,199,255,255,252,60,195,255,255,
++    255,252,8,127,255,243,3,143,199,255,255,254,102,99,255,255,
++    255,254,0,255,255,231,3,227,199,255,255,254,39,193,255,255,
++    255,254,0,255,255,231,3,225,199,255,255,254,63,0,255,255,
++    255,255,1,255,255,207,3,224,71,255,255,254,16,0,255,255,
++    255,255,239,255,255,207,3,224,7,255,255,255,1,224,127,255,
++    255,255,255,255,255,143,3,224,7,255,255,255,15,248,127,255,
++    255,255,111,255,255,159,3,240,7,255,255,255,14,24,63,255,
++    255,252,0,63,255,143,3,252,7,255,255,255,0,24,63,255,
++    255,252,0,31,255,142,3,254,7,255,255,255,128,120,63,255,
++    255,252,0,15,255,230,3,255,135,255,255,255,135,224,31,255,
++    255,254,17,7,255,198,3,255,199,255,255,255,135,4,31,255,
++    255,254,120,199,255,192,35,255,199,255,255,255,128,6,31,255,
++    255,252,124,71,255,192,99,231,199,255,255,255,128,6,15,255,
++    255,252,124,71,255,224,97,227,199,255,255,255,128,2,15,255,
++    255,252,16,7,255,192,32,96,199,255,255,255,128,46,15,255,
++    255,252,0,15,255,206,106,0,7,255,255,255,131,255,15,255,
++    255,254,0,143,255,220,99,128,7,255,255,255,195,208,7,255,
++    255,255,1,159,255,220,227,192,7,255,255,255,128,0,7,255,
++    255,255,239,255,255,156,35,240,7,255,255,255,128,3,7,255,
++    255,252,255,255,255,252,99,248,7,255,255,255,193,129,7,255,
++    255,252,31,255,255,152,195,254,7,255,255,255,131,3,135,255,
++    255,252,7,255,255,208,227,255,135,255,255,255,131,131,135,255,
++    255,254,0,255,255,193,224,255,199,255,255,255,129,255,7,255,
++    255,255,192,31,255,131,162,63,207,255,255,255,128,252,7,255,
++    255,255,224,7,255,4,75,159,199,255,255,255,128,0,7,255,
++    255,255,0,7,255,0,35,231,207,255,255,255,0,0,7,255,
++    255,252,1,135,255,0,43,247,199,255,255,255,128,0,7,255,
++    255,252,15,247,255,4,43,255,207,255,255,255,0,0,7,255,
++    255,252,63,255,255,30,35,255,207,255,255,255,0,0,15,255,
++    255,253,255,255,255,60,41,255,207,223,255,255,3,0,7,255,
++    255,255,255,255,255,30,0,255,199,239,255,254,3,135,15,255,
++    255,255,239,255,255,30,8,63,207,239,255,254,1,223,143,255,
++    255,252,0,127,255,142,3,15,198,79,255,254,0,254,15,255,
++    255,252,0,127,255,206,11,199,196,15,255,252,15,224,15,255,
++    255,252,0,127,255,142,3,241,192,31,255,252,31,224,15,255,
++    255,252,16,255,255,206,35,248,64,7,255,248,11,252,15,255,
++    255,254,120,255,255,206,99,254,1,31,255,248,0,60,31,255,
++    255,252,124,127,255,236,99,255,3,63,255,248,16,14,31,255,
++    255,252,124,127,255,196,67,255,198,127,255,240,48,0,31,255,
++    255,252,40,127,255,200,131,255,198,127,255,240,112,0,31,255,
++    255,252,0,127,255,136,3,255,196,127,255,224,112,12,31,255,
++    255,254,0,255,255,144,3,239,192,255,255,224,56,28,63,255,
++    255,255,1,255,255,128,99,247,192,255,255,224,63,92,63,255,
++    255,255,239,255,255,32,195,255,192,223,255,192,15,248,63,255,
++    255,255,255,255,255,65,199,255,192,223,255,192,3,240,127,255,
++    255,240,255,127,255,67,195,255,192,207,255,128,0,0,127,255,
++    255,224,60,127,254,135,128,255,192,15,255,128,184,0,127,255,
++    255,224,48,127,252,143,128,63,192,15,255,131,255,192,127,255,
++    255,192,0,127,248,31,0,31,192,15,255,129,199,224,255,255,
++    255,195,0,255,240,31,128,7,192,15,255,1,231,112,255,255,
++    255,199,3,255,240,31,193,193,196,31,255,0,127,0,255,255,
++    255,199,7,255,236,63,240,96,192,63,255,0,31,1,255,255,
++    255,199,31,255,252,31,240,24,8,31,255,0,7,129,255,255,
++    255,192,0,127,248,31,248,25,16,31,255,0,3,129,255,255,
++    255,192,0,127,248,28,60,28,64,63,254,7,128,193,255,255,
++    255,192,0,127,240,28,31,6,0,63,254,7,240,3,255,255,
++    255,192,0,127,248,8,0,1,1,255,254,3,254,3,255,255,
++    255,255,255,255,240,8,96,0,67,255,254,0,255,131,255,255,
++    255,255,3,255,249,9,224,0,39,255,254,0,127,131,255,255,
++    255,252,0,255,251,0,240,0,55,255,254,0,112,135,255,255,
++    255,248,40,255,253,1,136,0,31,239,254,0,240,7,255,255,
++    255,241,252,127,255,1,144,112,15,239,254,15,224,7,255,255,
++    255,242,190,127,255,96,152,112,31,207,254,31,248,7,255,255,
++    255,242,0,95,255,224,112,120,15,15,254,15,252,15,255,255,
++    255,226,0,143,255,224,56,8,0,31,254,0,254,15,255,255,
++    255,231,17,207,255,224,240,0,0,31,255,0,30,15,255,255,
++    255,230,124,231,255,224,248,112,0,31,255,0,0,15,255,255,
++    255,230,124,199,255,192,56,252,0,63,255,128,0,15,255,255,
++    255,230,126,103,253,128,60,254,0,127,255,0,0,31,255,255,
++    255,226,28,103,252,0,126,127,0,255,255,192,0,15,255,255,
++    255,243,0,103,254,0,127,255,195,255,255,224,0,31,255,255,
++    255,241,128,199,255,0,255,255,255,255,255,248,0,15,255,255,
++    255,248,235,143,255,195,255,255,255,255,255,255,0,31,255,255,
++    255,248,126,31,255,255,255,255,255,255,255,255,192,15,255,255,
++    255,252,0,31,255,255,255,255,255,255,255,255,240,15,255,255,
++    255,255,0,127,255,255,255,255,255,255,255,255,254,7,255,255,
++    255,255,235,255,255,255,255,255,255,255,255,255,255,192,10,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,252,0,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,224,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++    255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,
++};
 diff --git a/src/pico/eink.c b/src/pico/eink.c
 new file mode 100644
-index 0000000..dbec095
+index 0000000..7d0c6f7
 --- /dev/null
 +++ b/src/pico/eink.c
-@@ -0,0 +1,347 @@
+@@ -0,0 +1,434 @@
 +/*
 + * SSD1680 e-ink display backend for rp2040-doom on the Outpost badge.
 + *
@@ -179,6 +626,7 @@ index 0000000..dbec095
 +#include "pinoutOutpost.h"
 +#include "lcd.h"
 +#include "doom/doomstat.h"      // brightnessLevel
++#include "badge_image.h"        // static name-badge (296x128, fb_accum layout)
 +
 +#define EPD_SPI         spi1
 +#define EPD_BAUD        20000000
@@ -224,7 +672,15 @@ index 0000000..dbec095
 +// speed/contrast trade (see epaper/README.md in the badge repo)
 +#define WF_TPA          2       // group 0 drive frames
 +#define WF_FRAME_RATE   0x44
-+#define WF_GROUPS       1       // drop group 1 hold pulse + group 2
++#define WF_GROUPS       3       // keep both hold pulses: 9.4fps "milestone" contrast
++
++// Post-process for clarity: linear contrast stretch around mid-gray applied to
++// luma BEFORE the ordered dither. Ordered (Bayer) dither is temporally stable,
++// so static pixels stay identical frame-to-frame (no shimmer/extra ghosting) --
++// unlike error diffusion. gain = EINK_CONTRAST_NUM / (1 << EINK_CONTRAST_SHIFT).
++#define EINK_CONTRAST_NUM   3
++#define EINK_CONTRAST_SHIFT 1   // 3>>1 = 1.5x
++#define EINK_LUMA_MID       124 // midpoint of the 0..248 luma range
 +
 +static uint8_t fb_accum[EPD_BUFLEN];    // dither target (bit 1 = white)
 +static uint8_t fb_sent[EPD_BUFLEN];     // snapshot on the panel / in old RAM
@@ -249,6 +705,14 @@ index 0000000..dbec095
 +
 +// debug counters, printed from the core-0 input poll
 +volatile uint32_t eink_lines_pumped, eink_frames_pushed;
++
++// set by the core-0 input poll (hold U+R+A+B >3s); serviced in epd_poll on
++// core 1: do one full-strength panel reset to wipe accumulated ghosting.
++volatile uint8_t eink_clear_request;
++
++// name-badge takeover ("kill Doom"): 1 = show the static badge, 0 = play Doom.
++// Toggled by the core-0 input poll (hold L+R+A+B >3s); serviced in epd_poll.
++volatile uint8_t eink_badge_mode;
 +
 +// verify the flashed WHX region before anything parses it (called from i_main)
 +void outpost_wad_check(void) {
@@ -373,13 +837,80 @@ index 0000000..dbec095
 +
 +// ---- frame push state machine ------------------------------------------
 +
++// one full-strength refresh to `buf` (factory LUT, sets only new RAM like the
++// reference display_full -- setting old==new makes the controller skip
++// unchanged pixels, which leaves ghosts).
++static void epd_full_refresh(const uint8_t *buf) {
++    epd_set_window_full();
++    epd_cmd(0x24, buf, EPD_BUFLEN);
++    epd_cmd1(0x22, 0xF7);
++    epd_cmd(0x20, NULL, 0);
++    epd_wait();
++}
++
++// strong two-pass clear (drive every pixel black, then white) to shake out
++// accumulated ghosting; leaves the panel white with old RAM seeded white.
++// Caller must have run epd_init_regs() first (factory LUT).
++static void epd_clear_panel(void) {
++    memset(fb_sent, 0x00, EPD_BUFLEN); epd_full_refresh(fb_sent);   // all black
++    memset(fb_sent, 0xFF, EPD_BUFLEN); epd_full_refresh(fb_sent);   // all white
++    memset(fb_accum, 0xFF, EPD_BUFLEN);
++    epd_set_window_full();
++    epd_cmd(0x26, fb_sent, EPD_BUFLEN);                             // old RAM = white
++}
++
++// "kill Doom": clear the panel hard, then draw the static badge.
++static void epd_show_badge(void) {
++    epd_init_regs();                    // SW reset -> factory LUT from OTP
++    epd_clear_panel();                  // wipe Doom's ghost (incl. the status bar)
++    memcpy(fb_accum, badge_image, EPD_BUFLEN);
++    memcpy(fb_sent,  badge_image, EPD_BUFLEN);
++    epd_full_refresh(fb_sent);
++    epd_set_window_full();
++    epd_cmd(0x26, fb_sent, EPD_BUFLEN); // old RAM = badge
++}
++
++// leaving badge mode: clear the badge off the panel, then re-arm fast partial
++// so Doom redraws onto a clean white field.
++static void epd_resume_doom(void) {
++    epd_init_regs();
++    epd_clear_panel();                  // wipe the badge (else it ghosts under Doom)
++    epd_arm_partial();                  // charge pump up, short LUT reloaded
++}
++
 +static void __not_in_flash_func(epd_poll)(void) {
++    static uint8_t badge_shown;
++    if (eink_badge_mode) {              // "kill Doom": show the static badge, hold it
++        if (!badge_shown) {
++            if (epd_state == EPD_UPDATING) { if (epd_busy()) return; epd_state = EPD_IDLE; }
++            epd_show_badge();
++            badge_shown = 1;
++        }
++        return;
++    }
++    if (badge_shown) {                  // leaving badge mode -> resume Doom
++        epd_resume_doom();
++        epd_state = EPD_IDLE;
++        frame_dirty = false;
++        badge_shown = 0;
++    }
 +    if (epd_state == EPD_UPDATING) {
 +        if (epd_busy()) return;
 +        // update done: bring old RAM in sync so static pixels stay undriven
 +        epd_set_window_full();
 +        epd_cmd(0x26, fb_sent, EPD_BUFLEN);
 +        epd_state = EPD_IDLE;
++    }
++    if (epd_state == EPD_IDLE && eink_clear_request) {
++        eink_clear_request = 0;
++        // manual ghost clear (~2.5s). A full refresh straight after arm_partial()
++        // is weak (the factory LUT was overwritten), so re-init to restore it
++        // first, then re-arm the fast partial path.
++        epd_init_regs();      // SW reset -> factory LUT from OTP
++        epd_base_white();     // full-strength white: wipes ghosts, seeds old RAM
++        epd_arm_partial();    // reload short custom LUT, charge pump back up
++        frame_dirty = false;  // drop stale frame; the pump redraws the live scene
++        return;
 +    }
 +    if (epd_state == EPD_IDLE && frame_dirty) {
 +        frame_dirty = false;
@@ -410,13 +941,16 @@ index 0000000..dbec095
 +// y: doom scanline 0..199; buf: 320 pixels, 5:5:5 at shifts 11/6/0
 +void __not_in_flash_func(dispRenderLine)(uint y, uint16_t *buf, uint32_t width) {
 +    uint ty = line_target[y < SRC_H ? y : SRC_H - 1];
-+    if (ty != 0xFF) {
++    if (!eink_badge_mode && ty != 0xFF) {
 +        const uint8_t *brow = &bayer4[(ty & 3) * 4];
 +        int bias = dither_bias;
 +        for (uint tx = 0; tx < EPD_ROWS; tx++) {
 +            uint16_t p = buf[xmap[tx]];
 +            int r = (p >> 11) & 31, g = (p >> 6) & 31, b = p & 31;
 +            int luma = (r * 77 + g * 151 + b * 28) >> 5;    // 0..248
++            // contrast stretch around mid-gray for a crisper 1-bit image
++            luma = EINK_LUMA_MID +
++                   (((luma - EINK_LUMA_MID) * EINK_CONTRAST_NUM) >> EINK_CONTRAST_SHIFT);
 +            int t = brow[tx & 3] * 16 + 8;
 +            // screen x -> panel row 295-x (FLIP_X, matches the badge firmware)
 +            uint idx = (EPD_ROWS - 1 - tx) * EPD_STRIDE + (ty >> 3);
@@ -497,7 +1031,7 @@ index 0000000..dbec095
 +    dither_bias = ((int) bri - 8) * 12;
 +}
 diff --git a/src/pico/i_input.c b/src/pico/i_input.c
-index 8280e8e..ffdeed4 100644
+index 8280e8e..46629fb 100644
 --- a/src/pico/i_input.c
 +++ b/src/pico/i_input.c
 @@ -572,7 +572,7 @@ void I_GetEvent() {
@@ -509,7 +1043,7 @@ index 8280e8e..ffdeed4 100644
  static const uint8_t bdef[] = {
          DEFCON32_BADGE_SW_FN_PIN, SDL_SCANCODE_LALT, SDL_SCANCODE_LALT,
          DEFCON32_BADGE_SW_START_PIN, SDL_SCANCODE_ESCAPE, SDL_SCANCODE_TAB,
-@@ -588,6 +588,75 @@ static uint8_t buttons[count_of(bdef)/3];
+@@ -588,6 +588,119 @@ static uint8_t buttons[count_of(bdef)/3];
  static uint8_t keycodex[count_of(bdef)/3];
  #include "hardware/gpio.h"
  #include "doom/doomstat.h" // for menuactive
@@ -524,9 +1058,9 @@ index 8280e8e..ffdeed4 100644
 +//   FN+B   = cycle weapons, FN+A(Start slot unused)
 +// virtual button order matches bdef rows: FN, START, SELECT, L, R, U, D, A, B
 +static const uint8_t bdef[] = {
-+        0, SDL_SCANCODE_LALT, SDL_SCANCODE_LALT,          // FN (U+D)
-+        0, SDL_SCANCODE_ESCAPE, SDL_SCANCODE_TAB,         // START (A+B)
-+        0, SDL_SCANCODE_RETURN, SDL_SCANCODE_RETURN,      // SELECT (L+R)
++        0, SDL_SCANCODE_LALT, SDL_SCANCODE_LALT,          // FN (U+D): strafe / weapon
++        0, SDL_SCANCODE_TAB, SDL_SCANCODE_TAB,            // START: unused (chord removed)
++        0, SDL_SCANCODE_ESCAPE, SDL_SCANCODE_ESCAPE,      // SELECT (L+R): open/close menu
 +        0, SDL_SCANCODE_LEFT, SDL_SCANCODE_LEFT,
 +        0, SDL_SCANCODE_RIGHT, SDL_SCANCODE_RIGHT,
 +        0, SDL_SCANCODE_UP, SDL_SCANCODE_UP,
@@ -559,33 +1093,77 @@ index 8280e8e..ffdeed4 100644
 +    uint u = !gpio_get(PIN_BTN_U), d = !gpio_get(PIN_BTN_D);
 +    uint l = !gpio_get(PIN_BTN_L), r = !gpio_get(PIN_BTN_R);
 +    uint a = !gpio_get(PIN_BTN_A), b = !gpio_get(PIN_BTN_B);
-+    uint fn = u && d, start = a && b, sel = l && r;
++    // Chords use only the opposing d-pad pairs (U+D, L+R), which never occur in
++    // normal movement. A and B are NEVER part of a chord, so fire (B) and use
++    // (A) always work independently and together -- essential for combat.
++    uint fn = u && d, sel = l && r;
 +    // escape hatch: reflash without touching BOOTSEL. requires exactly
 +    // U+D+A+B (not L/R) so a misread all-low bus cannot trigger it.
 +    if (u && d && a && b && !l && !r) reset_usb_boot(0, 0);
 +    if (fn) poisoned |= 0x03;
 +    if (sel) poisoned |= 0x0c;
-+    if (start) poisoned |= 0x30;
 +    if (!u) poisoned &= ~0x01;
 +    if (!d) poisoned &= ~0x02;
 +    if (!l) poisoned &= ~0x04;
 +    if (!r) poisoned &= ~0x08;
-+    if (!a) poisoned &= ~0x10;
-+    if (!b) poisoned &= ~0x20;
 +    outpost_vbtn[0] = fn;
-+    outpost_vbtn[1] = start;
++    outpost_vbtn[1] = 0;                 // START chord removed (freed A+B for combat)
 +    outpost_vbtn[2] = sel;
 +    outpost_vbtn[3] = l && !(poisoned & 0x04);
 +    outpost_vbtn[4] = r && !(poisoned & 0x08);
 +    outpost_vbtn[5] = u && !(poisoned & 0x01);
 +    outpost_vbtn[6] = d && !(poisoned & 0x02);
-+    outpost_vbtn[7] = a && !(poisoned & 0x10);
-+    outpost_vbtn[8] = b && !(poisoned & 0x20);
++    outpost_vbtn[7] = a;                 // use (SPACE) -- always independent
++    outpost_vbtn[8] = b;                 // fire (LCTRL) -- always independent
++
++    // Hold U + R + A + B for >3 s = full panel reset (wipes accumulated ghosting).
++    // A long deliberate hold, so it can't fire by accident. Distinct from the
++    // U+D+A+B BOOTSEL combo (which needs D and no R).
++    {
++        extern volatile uint8_t eink_clear_request;
++        static uint32_t reset_hold_start;   // 0 = combo not currently held
++        static uint8_t reset_fired;         // already triggered this hold
++        if (u && r && a && b) {
++            uint32_t now = time_us_32();
++            if (!reset_hold_start) { reset_hold_start = now ? now : 1; reset_fired = 0; }
++            else if (!reset_fired && (now - reset_hold_start) > 3000000u) {
++                eink_clear_request = 1;     // serviced on core 1 in epd_poll()
++                reset_fired = 1;
++            }
++            // swallow the constituent buttons while the reset combo is held
++            for (unsigned k = 0; k < count_of(outpost_vbtn); k++) outpost_vbtn[k] = 0;
++        } else {
++            reset_hold_start = 0;
++        }
++    }
++
++    // Hold L + R + A + B for >3 s = toggle the name-badge takeover ("kill Doom"
++    // / resume). Held + deliberate; distinct from the reset (U+R+A+B) combo.
++    {
++        extern volatile uint8_t eink_badge_mode;
++        static uint32_t badge_hold_start, badge_last_down;
++        static uint8_t badge_fired;
++        uint32_t now = time_us_32();
++        if (l && r && a && b) {
++            if (!badge_hold_start) { badge_hold_start = now ? now : 1; badge_fired = 0; printf("[badge] combo down\n"); }
++            badge_last_down = now;
++            if (!badge_fired && (now - badge_hold_start) > 3000000u) {
++                eink_badge_mode = !eink_badge_mode;
++                badge_fired = 1;
++                printf("[badge] FIRED -> mode=%d\n", (int) eink_badge_mode);
++            }
++            for (unsigned k = 0; k < count_of(outpost_vbtn); k++) outpost_vbtn[k] = 0;
++        } else if (badge_hold_start && (now - badge_last_down) > 200000u) {
++            // tolerate brief (<200ms) releases so a bouncy 4-button hold still counts
++            printf("[badge] combo up (held %ums)\n", (unsigned)((badge_last_down - badge_hold_start) / 1000));
++            badge_hold_start = 0;
++        }
++    }
 +}
  #endif
  
  void I_GetEventTimeout(int key_timeout) {
-@@ -596,8 +665,26 @@ void I_GetEventTimeout(int key_timeout) {
+@@ -596,8 +709,26 @@ void I_GetEventTimeout(int key_timeout) {
      // this is a bit hacky, but just track the state
      // of each of the keys we care about, and select a different function
      // when the FN button is pressed
@@ -612,6 +1190,61 @@ index 8280e8e..ffdeed4 100644
          uint last_sel = buttons[i/3];
          if (new_sel && !last_sel) {
              if (bdef[i+1] == SDL_SCANCODE_RSHIFT) mods |= WITH_SHIFT;
+@@ -616,12 +747,13 @@ void I_GetEventTimeout(int key_timeout) {
+                 if (weapon_base != 7) weapon_base++;
+             }
+             if (menuactive) {
+-                // map B to "Y" and A to "N" unless in string entry
+-                // in which case we map them to RETURN/ESCAPE
+-                if (keycodex[i/3] == SDL_SCANCODE_LCTRL) {
++                // Single-button menu nav: A(use) = select/Enter, B(fire) = 'yes'
++                // on the quit/end prompts. L+R (ESCAPE) backs out / answers 'no'.
++                // In string entry (save names) keep confirm/cancel on B/A.
++                if (keycodex[i/3] == SDL_SCANCODE_SPACE) {          // A
++                    keycodex[i/3] = stringEntry ? SDL_SCANCODE_ESCAPE : SDL_SCANCODE_RETURN;
++                } else if (keycodex[i/3] == SDL_SCANCODE_LCTRL) {   // B
+                     keycodex[i/3] = stringEntry ? SDL_SCANCODE_RETURN : SDL_SCANCODE_Y;
+-                } else if (keycodex[i/3] == SDL_SCANCODE_SPACE) {
+-                    keycodex[i/3] = stringEntry ? SDL_SCANCODE_ESCAPE : SDL_SCANCODE_N;
+                 }
+             }
+             if (keycodex[i/3] == SDL_SCANCODE_LALT && !usergame) {
+diff --git a/src/pico/i_system.c b/src/pico/i_system.c
+index cd05c64..ca5f34f 100644
+--- a/src/pico/i_system.c
++++ b/src/pico/i_system.c
+@@ -18,6 +18,7 @@
+ 
+ #include "pico.h"
+ #include "pico/stdio.h"
++#include "pico/time.h"  // DIAG(outpost): busy_wait_ms
+ #if PICO_ON_DEVICE
+ #include "hardware/watchdog.h"
+ #include "doomtype.h"
+@@ -501,15 +502,20 @@ void __attribute((noreturn)) I_Quit (void)
+ // I_Error
+ //
+ 
+-#if !NO_IERROR || !PICO_ON_DEVICE
++#if 1  // DIAG(outpost): always compile the printing I_Error
+ void I_Error (const char *error, ...)
+ {
+     va_list argptr;
+     va_start(argptr, error);
+-    //stderr_print( "\nError: ");
++    printf("\n*** I_Error: ");
+     vprintf(error, argptr);
+     va_end(argptr);
+-    __breakpoint();
++    printf("\n");
++    // DIAG(outpost): flush over USB-CDC and keep IRQs alive so USB survives
++    // (lets us reboot to BOOTSEL via the 1200-baud touch instead of hard fault)
++    stdio_flush();
++    busy_wait_ms(400);
++    while (1) tight_loop_contents();
+ }
+ #endif
+ 
 diff --git a/src/pico/i_video.c b/src/pico/i_video.c
 index 000cc2d..47df00e 100644
 --- a/src/pico/i_video.c
@@ -673,3 +1306,40 @@ index 0000000..72fed0c
 +#define EINK_ALARM_NUM  2
 +
 +#endif
+diff --git a/src/whd_gen/lodepng.cpp b/src/whd_gen/lodepng.cpp
+index c0f7b9b..f991843 100644
+--- a/src/whd_gen/lodepng.cpp
++++ b/src/whd_gen/lodepng.cpp
+@@ -28,6 +28,7 @@ The manual and changelog are in the header file "lodepng.h"
+ Rename this file to lodepng.cpp to use it for C++, or to lodepng.c to use it for C.
+ */
+ 
++#include <cstdint>  // gcc14: INT32_MAX
+ #include "lodepng.h"
+ 
+ #include <limits.h>
+diff --git a/src/whd_gen/wad.h b/src/whd_gen/wad.h
+index 0ed92df..7f765f5 100644
+--- a/src/whd_gen/wad.h
++++ b/src/whd_gen/wad.h
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ #pragma once
++#include <cstdint>  // gcc14/modern libstdc++ no longer transitively includes this
+ #include <cctype>
+ #include <cstring>
+ #include <string>
+diff --git a/src/whd_gen/whd_gen.cpp b/src/whd_gen/whd_gen.cpp
+index c5c29a2..c1207d1 100644
+--- a/src/whd_gen/whd_gen.cpp
++++ b/src/whd_gen/whd_gen.cpp
+@@ -4,6 +4,8 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ #include "wad.h"
++#include <cstdint>  // gcc14: INT32_MAX and friends
++#include <climits>
+ #include <iostream>
+ #include <ostream>
+ #include <algorithm>
