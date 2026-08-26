@@ -1,0 +1,20 @@
+WAD region: 49 57 48 58 checksum 45f35bf3
+                         Chocolate Doom 3.0.0
+Z_Init: Init zone memory allocation daemon. 
+zone memory: 2004031C, 2fce4 allocated for zone
+M_LoadDefaults: Load system defaults.
+W_Init: Init WADfiles.
+===========================================================================
+                            DOOM Shareware
+===========================================================================
+ Chocolate Doom is free software, covered by the GNU General Public
+ License.  There is NO warranty; not even for MERCHANTABILITY or FITNESS
+ FOR A PARTICULAR PURPOSE. You are welcome to change and distribute
+ copies under certain conditions. See the source for more information.
+===========================================================================
+I_Init: Setting up machine state.
+Connecting PIO pwm8 audio
+Copying stereo to stereo at 49716 Hz
+TODO... not completing stereo audio connection properly!
+M_Init: Init miscellaneous info.
+R_Init: Init DOOM refresh daemon - .
