@@ -1,4 +1,4 @@
-import { uid, type Layer, type Project, type TextLayer } from './types';
+import { uid, type Layer, type LogoLayer, type Project, type TextLayer } from './types';
 
 export function defaultGlobal() {
 	return { mode: 'floyd' as const, threshold: 128, invert: false };
@@ -28,6 +28,31 @@ function baseText(partial: Partial<TextLayer>): TextLayer {
 		letterSpacing: 0,
 		align: 'left',
 		color: 'black',
+		...partial
+	};
+}
+
+function baseLogo(partial: Partial<LogoLayer>): LogoLayer {
+	return {
+		id: uid('lg'),
+		type: 'logo',
+		name: 'Logo',
+		x: 0,
+		y: 0,
+		width: 100,
+		height: 60,
+		rotation: 0,
+		visible: true,
+		opacity: 1,
+		locked: false,
+		dither: 'inherit',
+		threshold: 128,
+		invert: false,
+		src: '',
+		fit: 'fit',
+		brightness: 0,
+		contrast: 0,
+		gamma: 1,
 		...partial
 	};
 }
@@ -136,6 +161,62 @@ export const PRESETS: Preset[] = [
 					contrast: 0,
 					gamma: 1
 				} as Layer
+			]
+		})
+	},
+	{
+		id: 'raygen',
+		label: 'Raygen Rupe',
+		build: () => ({
+			version: 1,
+			background: 'white',
+			global: { mode: 'threshold', threshold: 128, invert: false },
+			layers: [
+				baseLogo({
+					name: 'Avatar',
+					src: '/logos/raygen-avatar.png',
+					x: 168,
+					y: 0,
+					width: 128,
+					height: 128,
+					fit: 'fill',
+					dither: 'floyd'
+				}),
+				{
+					id: uid('s'),
+					type: 'shape',
+					name: 'Divider',
+					x: 166,
+					y: 0,
+					width: 1,
+					height: 128,
+					rotation: 0,
+					visible: true,
+					opacity: 1,
+					locked: false,
+					dither: 'inherit',
+					threshold: 128,
+					invert: false,
+					shape: 'rect',
+					fill: 'black',
+					stroke: 'none',
+					strokeWidth: 0,
+					radius: 0
+				} as Layer,
+				baseText({
+					name: 'Name',
+					text: 'Raygen Rupe',
+					x: 6,
+					y: 2,
+					width: 156,
+					height: 26,
+					fontSize: 22,
+					font: "'Space Mono', monospace",
+					weight: 700
+				}),
+				baseLogo({ name: 'OUTPOST', src: '/logos/outpost-banner.png', x: 6, y: 30, width: 152, height: 46 }),
+				baseLogo({ name: 'Open Sauce', src: '/logos/open-sauce.png', x: 108, y: 80, width: 42, height: 44 }),
+				baseLogo({ name: 'Hack Club', src: '/logos/hackclub-flag.png', x: 6, y: 88, width: 96, height: 33 })
 			]
 		})
 	},

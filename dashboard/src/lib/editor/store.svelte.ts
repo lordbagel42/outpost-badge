@@ -25,8 +25,9 @@ export interface LogoDef {
 
 export const LOGOS: LogoDef[] = [
 	{ id: 'outpost', label: 'OUTPOST', src: '/logos/outpost-banner.png', w: 260, h: 88 },
-	{ id: 'hackclub', label: 'Hack Club', src: '/logos/hackclub-flag.svg', w: 120, h: 72 },
-	{ id: 'opensauce', label: 'Open Sauce', src: '/logos/open-sauce.svg', w: 130, h: 45 },
+	{ id: 'hackclub', label: 'Hack Club', src: '/logos/hackclub-flag.png', w: 96, h: 34 },
+	{ id: 'opensauce', label: 'Open Sauce', src: '/logos/open-sauce.png', w: 44, h: 56 },
+	{ id: 'raygen', label: 'Raygen', src: '/logos/raygen-avatar.png', w: 96, h: 103 },
 	{ id: 'avatar', label: 'Avatar', src: '/logos/avatar.svg', w: 72, h: 72 }
 ];
 
