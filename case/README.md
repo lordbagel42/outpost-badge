@@ -1,6 +1,8 @@
 # 3D-printable case for the Outpost badge
 
 A two-part, screw-together case generated straight from the KiCad board file.
+Designed for a **0.6 mm nozzle**: nothing in it is thinner than 1 mm, which
+`tools/check_walls.py` verifies by slicing the exported STLs.
 
 ![assembled, front](images/assembly_front.png)
 
@@ -41,9 +43,12 @@ A two-part, screw-together case generated straight from the KiCad board file.
   outer face: on the back that is the red panda and flames, the RESET/BOOT
   swirls, the small cat by the USB port and the *HACK CLUB* flag; on the front
   it is the mascot and *HACK CLUB* flag on the protoboard area and the lightning
-  bolts next to the centre slot. Features under 2 mm (the GPIO pin labels and
-  the PCB's own 1.3 mm RESET/BOOT letters) are dropped because they will not
-  print; RESET/BOOT are re-typed at 2.6 mm instead.
+  bolts next to the centre slot. The art is filtered for the nozzle: engraved
+  strokes narrower than 1 mm are dropped and gaps narrower than 1 mm between
+  engraved areas are filled (`min_feature`), so fine line detail becomes
+  silhouette. Features under 2 mm (the GPIO pin labels and the PCB's own 1.3 mm
+  RESET/BOOT letters) are dropped entirely; RESET/BOOT are re-typed at 4 mm
+  beside their holes instead.
 
 ## Files
 
@@ -53,6 +58,7 @@ A two-part, screw-together case generated straight from the KiCad board file.
 | `board_data.scad` | Generated board geometry + artwork polygons. Do not edit; regenerate. |
 | `tools/extract_board.py` | Reads `PCB/einkbadge.kicad_pcb` and writes `board_data.scad`. |
 | `tools/export.sh` | Regenerates the data, all STLs and the preview images. |
+| `tools/check_walls.py` | Slices the STLs and lists any solid feature thinner than 1 mm. |
 | `stl/back.stl` | Back shell, print orientation. |
 | `stl/front.stl` | One-piece front (bezel + ear frame + protoboard cover), print orientation. |
 | `stl/front_header_slots.stl` | Same, with slots for pin headers soldered into J3–J6. |
@@ -64,18 +70,21 @@ Both parts print **face down, no supports**: the back shell exterior on the
 bed with the cavity up, the front piece with its visible face on the bed. The
 STLs are already in that orientation.
 
-* 0.2 mm layers, 0.4 mm nozzle, 3 perimeters, PLA or PETG.
-* The artwork is a 0.6 mm recess in the first three layers. For a two-colour
+* 0.6 mm nozzle, 0.3 mm layers, 3–4 perimeters, PLA or PETG. Walls are 2.4 mm
+  (four lines), the floor 2.1 mm (seven layers), the cover roof 1.8 mm, and no
+  rib, ridge or engraved stroke anywhere is under 1 mm, so a 0.6 mm nozzle
+  resolves everything. A 0.4 mm nozzle prints it too.
+* The artwork is a 0.6 mm recess in the first two layers. For a two-colour
   result add a **filament change at 0.6 mm**: the first colour becomes the face,
   the second shows through as the art, the inner-ear rings and the labels.
-* Footprint is about 113 × 105 mm per part. `part = "plate"` puts both on one
+* Footprint is about 114 × 106 mm per part. `part = "plate"` puts both on one
   bed (needs ~235 × 110 mm).
 
 ## Hardware
 
 * 4 × **M2 × 8 mm** screws (self-tapping or machine screws into the 1.7 mm
   bosses). For heat-set inserts set `screw_hole_d = 3.2`.
-* No other hardware. Total stack is 12.5 mm thick.
+* No other hardware. Total stack is 12.8 mm thick.
 
 ## Assembly
 
@@ -113,7 +122,13 @@ with it (the wall is different).
 ```sh
 pip install shapely            # optional, simplifies the artwork polygons
 OPENSCAD=/path/to/openscad-2024+ case/tools/export.sh
+pip install trimesh shapely scipy rtree networkx
+python3 case/tools/check_walls.py   # thin-wall audit of everything in case/stl
 ```
+
+If you change a clearance or a window, run the check: it cuts every part at
+each 0.3 mm layer and every 4 mm vertically, erodes each slice by 0.5 mm and
+reports whatever disappears (with its position), ignoring corner roundings.
 
 OpenSCAD 2024 or newer is strongly recommended: with the Manifold backend each
 part renders in a couple of seconds. OpenSCAD 2021.01 renders the same files but

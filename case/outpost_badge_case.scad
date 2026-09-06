@@ -21,6 +21,9 @@
 // Coordinates: mm, origin = centre of the PCB, +Y towards the ears, Z = 0 at
 // the PCB top (screen side) surface, +Z towards the viewer of the screen.
 //
+// Designed for a 0.6 mm nozzle / 0.3 mm layers: no wall, rib or engraved
+// feature is thinner than min_feature (1.0 mm) anywhere in the model.
+//
 // Recommended: OpenSCAD 2024+ (Manifold backend).  2021.01 works but is slow.
 
 include <board_data.scad>
@@ -36,12 +39,12 @@ split_front = false;
 show_pcb = true;
 
 /* [Shell] */
-// Wall thickness
-wall = 2.0;
+// Wall thickness (4 lines of a 0.6 mm nozzle)
+wall = 2.4;
 // Gap between PCB edge and wall
 clearance = 0.3;
-// Back floor thickness (art recess is cut into this)
-floor_t = 1.8;
+// Back floor thickness (art recess is cut into this, 7 layers of 0.3 mm)
+floor_t = 2.1;
 // Free height under the PCB (USB-C 3.3 mm, switch pins 3.5 mm)
 back_cavity = 4.3;
 // How far the wall rises above the PCB top surface
@@ -70,14 +73,16 @@ dpad_center_open = true;
 header_slots = false;
 // Gap around the header pad rows
 header_clear = 0.6;
+// Width of the cover rim that rests on the PCB inside the wall
+cover_rim = 1.2;
 
 /* [Cat ears] */
 // Grow the ears of the case beyond the PCB ears (0 = follow the PCB)
 ear_boost = 1.5;
 // Width of the "inner ear" recess ring around each ear slot
-ear_ring_w = 1.9;
-// Gap between slot edge and inner-ear ring
-ear_ring_gap = 0.5;
+ear_ring_w = 1.5;
+// Wall between slot edge and inner-ear ring
+ear_ring_gap = 1.2;
 
 /* [Artwork] */
 // recess = engraved 0.6 mm (prints face down, no supports).  emboss = raised (needs the exterior face up).
@@ -86,13 +91,16 @@ art_mode = "recess"; // [recess, emboss, none]
 art_depth = 0.6;
 // Drop artwork features smaller than this (tiny text is not printable)
 art_min = 2.0;
-// Fatten thin strokes by this much
+// Fatten thin strokes by this much before filtering
 art_grow = 0.1;
+// Smallest printable feature: engraved strokes narrower than this are dropped and
+// ridges between engravings narrower than this are filled (1.0 for a 0.6 mm nozzle)
+min_feature = 1.0;
 // Keep artwork this far from openings and edges
-art_margin = 0.6;
+art_margin = 1.2;
 // Recreate the RESET / BOOT labels as legible text (the PCB's 1.3 mm letters are too small to print)
 back_labels = true;
-label_size = 2.6;
+label_size = 4.0;
 
 /* [Fasteners] */
 // Hole in the back bosses: 1.7 = M2 thread-forming into plastic, 3.2 = M2 heat-set insert
@@ -104,13 +112,13 @@ screw_shank_d = 2.4;
 // Counterbore for the M2 head
 screw_head_d = 4.2;
 screw_head_h = 2.0;
-// Column diameter around the screw inside the cover
-front_col_d = 5.5;
+// Column diameter around the screw inside the cover (>= screw_head_d + 2 * min_feature)
+front_col_d = 6.5;
 
 /* [Openings] */
 // USB-C opening (sized for the plug overmould, connector face is flush with the PCB edge)
 usb_w = 13.0;
-usb_h = 7.0;
+usb_h = 6.8;
 // Extra clearance around the lanyard slots
 slot_clear = 0.5;
 // Pen-tip access holes for RESET / BOOT on the back
@@ -147,12 +155,24 @@ dpad = [for (b = buttons) if (b[0] == "SW1" || b[0] == "SW2" || b[0] == "SW3" ||
 dpad_center = [(dpad[0][0] + dpad[1][0] + dpad[2][0] + dpad[3][0]) / 4,
                (dpad[0][1] + dpad[1][1] + dpad[2][1] + dpad[3][1]) / 4];
 
-// Front NFC window: the antenna loop plus the art around it, right up to the
-// board edge (leaves a rim), from the top edge down to the seam.
-nfc_window = [nfc_rect[0] - 0.1, seam_y + 0.4, board_xmax - 1.5, ear_base_y - 2.6];
+// Lowest point of the ear lanyard slots (with clearance): the windows below must
+// leave at least min_feature (+ the bezel chamfer on the front) of material to it.
+ear_slot_bottom = min([for (s = ear_slots) for (p = s) p[1]]) - slot_clear;
+// Front NFC window: the antenna loop plus the art around it, up to the ear slots
+// and out towards the board edge (leaving a >= 1 mm rim after the chamfer).
+nfc_window = [nfc_rect[0] - 0.1,
+              seam_y + (split_front ? min_feature + 0.2 + bezel_chamfer : 0.4),
+              board_xmax - 1.5 - bezel_chamfer - (split_front ? 0.2 : 0),
+              ear_slot_bottom - min_feature - 0.2 - bezel_chamfer];
 // Back window: OUTPOST / QR / dates / Open Sauce block (same area as the antenna)
-back_window = [nfc_rect[0] - 0.8, seam_y - 1.6, board_xmax - 1.2, ear_base_y - 2.2];
+back_window = [nfc_rect[0] - 0.8, seam_y - 1.6, board_xmax - 1.2, ear_slot_bottom - min_feature - 0.2];
 back_mesa_xmin = back_window[0] + 1.5;      // no raised rim on the left (components there)
+// The screen pocket is extended up to the centre lanyard slot and down to the seam so no
+// sliver of frame is left standing on the PCB between the pocket and a cut-out.
+slot_top_y = max([for (s = lanyard_slots) for (p = s) if (p[1] < ear_base_y) p[1]]);
+pocket_rect = [screen_module[0] - 0.4, seam_y - 0.1,
+               max(screen_module[2] + 0.4, nfc_window[0] + 0.3),   // run into the NFC window: no sliver between them
+               slot_top_y + slot_clear + 0.3];
 
 // ------------------------------------------------------------ 2D helpers ---
 module rect(r) translate([r[0], r[1]]) square([r[2] - r[0], r[3] - r[1]]);
@@ -171,9 +191,12 @@ module case2d() {                                                   // outer out
             intersection() { board2d(); above(ear_base_y + 4); }
 }
 module slots2d(c) for (s = lanyard_slots) offset(r = c) polygon(s);
-module ear_rings2d() difference() {
-    for (s = ear_slots) offset(r = slot_clear + ear_ring_gap + ear_ring_w) polygon(s);
-    for (s = ear_slots) offset(r = slot_clear + ear_ring_gap) polygon(s);
+module ear_rings2d() intersection() {
+    difference() {
+        for (s = ear_slots) offset(r = slot_clear + ear_ring_gap + ear_ring_w) polygon(s);
+        for (s = ear_slots) offset(r = slot_clear + ear_ring_gap) polygon(s);
+    }
+    above(ear_base_y - 1.0);                        // stop before the screen pocket / windows
 }
 module cover_zone2d() intersection() { case2d(); below(seam_y); }
 module bezel_zone2d() intersection() { case2d(); above(seam_y); }
@@ -204,9 +227,21 @@ module cavity2d() intersection() {
     }
 }
 
+// Morphological closing then opening: fills gaps narrower than min_feature and
+// removes features narrower than min_feature, so everything left prints.
+module closing(m) offset(r = -m / 2) offset(r = m / 2) children();
+module opening(m) offset(r = m / 2) offset(r = -m / 2) children();
+module printable2d() opening(min_feature) closing(min_feature + 0.1) children();
+
 // Artwork union for one side, small features dropped
-module art2d(side) offset(r = art_grow) union() {
+module art2d(side) closing(min_feature + 0.1) offset(r = art_grow) union() {
     for (a = (side == "front") ? art_front : art_back) if (a[0] >= art_min) polygon(a[2]);
+}
+// Artwork clipped to a face with a margin, then filtered so no engraved stroke
+// or remaining ridge is thinner than min_feature.
+module art_on_face2d(side) opening(min_feature) intersection() {
+    art2d(side);
+    offset(r = -art_margin) children();
 }
 
 // ------------------------------------------------------------ 3D helpers ---
@@ -226,14 +261,14 @@ module back_face2d() difference() {                 // exterior face available f
     if (swd_slot) rrect(grown(swd_rect, 0.6), 0.8);
     ear_rings2d();
 }
-// RESET / BOOT labels above their holes, mirrored so they read correctly from the back
+// RESET / BOOT labels beside their holes, mirrored so they read correctly from the back
 module back_labels2d() if (back_labels) for (b = back_buttons)
-    translate([b[1][0], b[1][1] + back_button_hole_d / 2 + 0.6 + label_size * 0.55]) mirror([1, 0])
-        text(b[0] == "RESET1" ? "RESET" : "BOOT", size = label_size, halign = "center", valign = "center",
+    translate([b[1][0] - back_button_hole_d / 2 - 1.6, b[1][1]]) mirror([1, 0])
+        text(b[0] == "RESET1" ? "RESET" : "BOOT", size = label_size, halign = "left", valign = "center",
              font = "Liberation Sans:style=Bold");
 module back_art(z0, h) ext(z0, h) {
-    intersection() { art2d("back"); offset(r = -art_margin) difference() { back_face2d(); offset(r = 0.8) back_labels2d(); } }
-    back_labels2d();
+    art_on_face2d("back") difference() { back_face2d(); offset(r = art_margin + 0.2) back_labels2d(); }
+    printable2d() offset(r = 0.15) back_labels2d();
 }
 
 module usb_cut() {
@@ -280,7 +315,7 @@ module back_shell() difference() {
 // ================================================================ FRONT ===
 module frame_face2d() difference() {                // bezel / ear frame top face available for art
     bezel_zone2d();
-    rect(grown(screen_module, 0.4));                        // anything under the screen is hidden by the screen itself
+    rect(pocket_rect);                               // anything under the screen is hidden by the screen itself
     nfc_window2d();
     slots2d(slot_clear);
     ear_rings2d();
@@ -294,8 +329,8 @@ module cover_face2d() difference() {                // cover top face available 
 module front_art(sign) {                            // sign = -1 recess, +1 emboss
     z1 = (sign < 0) ? frame_top - art_depth : frame_top - eps;
     z2 = (sign < 0) ? cover_top - art_depth : cover_top - eps;
-    ext(z1, art_depth + eps) intersection() { art2d("front"); offset(r = -art_margin) frame_face2d(); }
-    ext(z2, art_depth + eps) intersection() { art2d("front"); offset(r = -art_margin) cover_face2d(); }
+    ext(z1, art_depth + eps) art_on_face2d("front") frame_face2d();
+    ext(z2, art_depth + eps) art_on_face2d("front") cover_face2d();
 }
 
 module front_body() difference() {
@@ -315,7 +350,7 @@ module front_body() difference() {
     }
     // pocket for the e-ink module and its FPC fold on the left edge
     ext(-1, screen_h + 1) {
-        rect(grown(screen_module, 0.4));
+        rect(pocket_rect);
         translate([board_xmin - 3, fpc_notch[1] - 2]) square([screen_module[0] - board_xmin + 3.5, fpc_notch[3] - fpc_notch[1] + 4]);
     }
     // screen window (bezel) and NFC window, both chamfered on the front
@@ -326,7 +361,7 @@ module front_body() difference() {
     ext(-1, cover_top + 2) slots2d(slot_clear);
     // protoboard cover cavity (screw columns stay)
     ext(-1, cover_inner + 1) difference() {
-        intersection() { offset(r = -0.8) board2d(); below(cavity_y); }
+        intersection() { offset(r = -cover_rim) board2d(); below(cavity_y); }
         for (h = mount_holes) translate(h[1]) circle(d = front_col_d);
     }
     // button openings and header slots through the roof
@@ -336,26 +371,28 @@ module front_body() difference() {
         cylinder(d = screw_shank_d, h = cover_top + 2);
         translate([0, 0, cover_top + 1 - screw_head_h]) cylinder(d = screw_head_d, h = screw_head_h + 1);
     }
-    // recreated artwork + inner-ear accent
+    // recreated artwork + inner-ear accent (the split bezel has no wall margin for the ring)
     if (art_mode == "recess") front_art(-1);
-    ext(frame_top - art_depth, art_depth + 1) ear_rings2d();
+    if (!split_front) ext(frame_top - art_depth, art_depth + 1) ear_rings2d();
 }
 
-// Split variants: tongue (bezel, low) under a bar (cover, high) in the band
+// Split variants: in the band between seam_y and cavity_y the bezel keeps a
+// tongue (low, inside the wall only) and the cover keeps the bar above it plus
+// everything over the wall.
 tongue_h = 1.6;
+module plug2d() offset(r = -bezel_fit) pocket2d();
+module band2d() translate([-300, cavity_y]) square([600, band]);
 module front_bezel() intersection() {
     front_body();
     union() {
         translate([-300, seam_y, -10]) cube([600, 600, 60]);
-        translate([-300, cavity_y, -10]) cube([600, band + eps, 10 + tongue_h]);
+        ext(-10, 10 + tongue_h) intersection() { band2d(); offset(r = -0.3) plug2d(); }
     }
 }
-module front_cover() intersection() {
+module front_cover() difference() {
     front_body();
-    union() {
-        translate([-300, -600 + cavity_y, -10]) cube([600, 600, 60]);
-        translate([-300, cavity_y - eps, tongue_h + bezel_fit]) cube([600, band + eps, 60]);
-    }
+    translate([-300, seam_y + eps, -10]) cube([600, 600, 60]);
+    ext(-10, 10 + tongue_h + bezel_fit) intersection() { offset(delta = eps) band2d(); plug2d(); }
 }
 
 // ============================================================== OUTPUT ====
