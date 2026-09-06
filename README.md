@@ -11,7 +11,7 @@ Includes:
 - 15 additional gpio pins broken out to use with the perfboard at the bottom
 - USB-C for power and programming
 - 3 lanyard holes that fit single + double clip lanyards, and badge clips
-- 4 mounting holes in case you want to 3d print a case 
+- 4 mounting holes in case you want to 3d print a case - see [`case/`](case/) for a printable one
 
 [Here](https://user-cdn.hackclub-assets.com/019ff91c-0464-7b39-83fa-bce072a783c1/img_1220__yafw_balanced_.mp4) is a video of flappy bird on it! Firmware by [@SamDev-7](https://github.com/SamDev-7)
 
