@@ -28,7 +28,6 @@ export const LOGOS: LogoDef[] = [
 	{ id: 'hackclub', label: 'Hack Club', src: '/logos/hackclub-flag.png', w: 96, h: 34 },
 	{ id: 'opensauce', label: 'Open Sauce', src: '/logos/open-sauce.png', w: 44, h: 56 },
 	{ id: 'raygen', label: 'Raygen', src: '/logos/raygen-avatar.png', w: 96, h: 103 },
-	{ id: 'avatar', label: 'Avatar', src: '/logos/avatar.svg', w: 72, h: 72 }
 ];
 
 const STORAGE_KEY = 'outpost-badge-studio.project.v1';
@@ -307,6 +306,7 @@ class EditorStore {
 
 	load() {
 		if (!browser) return;
+		this.ensureFonts();
 		try {
 			const raw = localStorage.getItem(STORAGE_KEY);
 			if (raw) {
@@ -338,7 +338,21 @@ class EditorStore {
 				if (l.type === 'text') this.syncTextSize(l as TextLayer);
 			}
 		}
+		this.ensureFonts();
 		this.persist();
+	}
+
+	ensureFonts() {
+		if (!browser || typeof document === 'undefined' || !document.fonts) return;
+		document.fonts
+			.load("700 22px 'Phantom Sans'")
+			.then(() => document.fonts.ready)
+			.then(() => {
+				for (const l of this.project.layers)
+					if (l.type === 'text') this.syncTextSize(l as TextLayer);
+				this.loadTick++;
+			})
+			.catch(() => {});
 	}
 
 	reset() {

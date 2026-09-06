@@ -205,18 +205,18 @@ export const PRESETS: Preset[] = [
 				} as Layer,
 				baseText({
 					name: 'Name',
-					text: 'Raygen Rupe',
+					text: '@Raygen Rupe',
 					x: 6,
-					y: 2,
+					y: 4,
 					width: 156,
-					height: 26,
+					height: 24,
 					fontSize: 22,
-					font: "'Space Mono', monospace",
+					font: "'Phantom Sans', sans-serif",
 					weight: 700
 				}),
-				baseLogo({ name: 'OUTPOST', src: '/logos/outpost-banner.png', x: 6, y: 30, width: 152, height: 46 }),
-				baseLogo({ name: 'Open Sauce', src: '/logos/open-sauce.png', x: 108, y: 80, width: 42, height: 44 }),
-				baseLogo({ name: 'Hack Club', src: '/logos/hackclub-flag.png', x: 6, y: 88, width: 96, height: 33 })
+				baseLogo({ name: 'OUTPOST', src: '/logos/outpost-banner.png', x: 6, y: 32, width: 148, height: 38 }),
+				baseLogo({ name: 'Open Sauce', src: '/logos/open-sauce.png', x: 110, y: 74, width: 38, height: 48, dither: 'floyd' }),
+				baseLogo({ name: 'Hack Club', src: '/logos/hackclub-flag.png', x: 4, y: 88, width: 94, height: 33 })
 			]
 		})
 	},

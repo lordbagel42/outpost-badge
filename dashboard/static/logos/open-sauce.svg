@@ -1,7 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 260 90" width="260" height="90">
-  <rect width="260" height="90" fill="#fff"/>
-  <rect x="4" y="4" width="252" height="82" fill="none" stroke="#000" stroke-width="4"/>
-  <circle cx="34" cy="45" r="18" fill="none" stroke="#000" stroke-width="6"/>
-  <text x="62" y="40" font-family="monospace" font-size="22" font-weight="700" fill="#000">OPEN</text>
-  <text x="62" y="70" font-family="monospace" font-size="22" font-weight="700" fill="#000">SAUCE</text>
-</svg>

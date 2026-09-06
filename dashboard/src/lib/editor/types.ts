@@ -90,6 +90,7 @@ export interface Project {
 }
 
 export const FONT_CHOICES = [
+	{ label: 'Phantom Sans (Hack Club)', css: "'Phantom Sans', sans-serif" },
 	{ label: 'Space Mono', css: "'Space Mono', monospace" },
 	{ label: 'IBM Plex Mono', css: "'IBM Plex Mono', monospace" },
 	{ label: 'Silkscreen (pixel)', css: "'Silkscreen', monospace" },
