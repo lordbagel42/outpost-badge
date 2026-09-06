@@ -237,7 +237,7 @@ index 1609526..5871e3e 100644
  #else
  #include "pico.h"
 diff --git a/src/pico/CMakeLists.txt b/src/pico/CMakeLists.txt
-index 063b28c..73ca923 100644
+index 063b28c..d5e3593 100644
 --- a/src/pico/CMakeLists.txt
 +++ b/src/pico/CMakeLists.txt
 @@ -1,3 +1,15 @@
@@ -278,7 +278,7 @@ index 063b28c..73ca923 100644
  
  pico_generate_pio_header(common_pico ${CMAKE_CURRENT_LIST_DIR}/video_doom.pio)
 -target_link_libraries(common_pico INTERFACE pico_stdlib pico_multicore pico_scanvideo_dpi)
-+target_link_libraries(common_pico INTERFACE pico_stdlib pico_multicore pico_scanvideo_dpi hardware_spi)
++target_link_libraries(common_pico INTERFACE pico_stdlib pico_multicore pico_scanvideo_dpi hardware_spi hardware_flash pico_flash)
  
  add_library(pico_cd INTERFACE)
  if (TARGET tinyusb_host)
@@ -592,10 +592,10 @@ index 0000000..a7faf28
 +};
 diff --git a/src/pico/eink.c b/src/pico/eink.c
 new file mode 100644
-index 0000000..2f3ac82
+index 0000000..02e572a
 --- /dev/null
 +++ b/src/pico/eink.c
-@@ -0,0 +1,624 @@
+@@ -0,0 +1,784 @@
 +/*
 + * SSD1680 e-ink display backend for rp2040-doom on the Outpost badge.
 + *
@@ -624,10 +624,24 @@ index 0000000..2f3ac82
 +#include "hardware/gpio.h"
 +#include "hardware/irq.h"
 +#include "hardware/structs/timer.h"
++#include "hardware/flash.h"
++#include "pico/flash.h"
++#include "pico/bootrom.h"
 +#include "pinoutOutpost.h"
 +#include "lcd.h"
 +#include "doom/doomstat.h"      // brightnessLevel
 +#include "badge_image.h"        // static name-badge (296x128, fb_accum layout)
++
++// Custom badge image + name, configured over USB and stored in the last 8 KB of
++// flash (0x101FE000), which sits past the 1.8 MB DOOM WAD (ends ~0x101FBA00).
++// active_badge_image points at the baked image, or the flash copy when set.
++#define CFG_FLASH_OFFSET  ((2u * 1024 * 1024) - (8u * 1024))   // 0x1FE000
++#define CFG_FLASH_SIZE    (8u * 1024)
++#define CFG_XIP           ((const uint8_t *)(XIP_BASE + CFG_FLASH_OFFSET))
++#define CFG_IMG_OFF       256
++const uint8_t *active_badge_image = badge_image;
++static char badge_name[64];
++static uint8_t badge_name_len;
 +
 +#define EPD_SPI         spi1
 +#define EPD_BAUD        20000000
@@ -939,7 +953,7 @@ index 0000000..2f3ac82
 +    // dark mode so it doesn't leave a white frame; white (0x05) in light mode.
 +    epd_cmd1(0x3C, eink_badge_invert ? 0x00 : 0x05);
 +    for (unsigned i = 0; i < EPD_BUFLEN; i++)
-+        fb_sent[i] = eink_badge_invert ? (uint8_t) ~badge_image[i] : badge_image[i];
++        fb_sent[i] = eink_badge_invert ? (uint8_t) ~active_badge_image[i] : active_badge_image[i];
 +    memcpy(fb_accum, fb_sent, EPD_BUFLEN);
 +    epd_full_refresh(fb_sent);
 +    epd_set_window_full();
@@ -1179,10 +1193,156 @@ index 0000000..2f3ac82
 +    }
 +}
 +
++// ===================== custom badge: flash storage + USB serial =============
++static uint8_t cfg_buf[CFG_FLASH_SIZE];   // RAM staging for one flash sector write
++
++static void __not_in_flash_func(cfg_do_flash)(void *unused) {
++    (void) unused;
++    flash_range_erase(CFG_FLASH_OFFSET, CFG_FLASH_SIZE);
++    flash_range_program(CFG_FLASH_OFFSET, cfg_buf, CFG_FLASH_SIZE);
++}
++static bool cfg_commit(void) {
++    return flash_safe_execute(cfg_do_flash, NULL, 3000) == PICO_OK;
++}
++static void cfg_set_header(int namelen) {
++    memset(cfg_buf, 0xFF, CFG_FLASH_SIZE);
++    cfg_buf[0] = 'O'; cfg_buf[1] = 'P'; cfg_buf[2] = 'B'; cfg_buf[3] = '1';
++    cfg_buf[4] = 1;                       // version
++    cfg_buf[5] = 1;                       // flags: has_image
++    if (namelen > 63) namelen = 63;
++    cfg_buf[6] = (uint8_t) namelen; cfg_buf[7] = 0;
++    memset(cfg_buf + 8, 0, 256 - 8);
++    if (namelen) memcpy(cfg_buf + 8, badge_name, namelen);
++}
++
++// screen-space wire image (128 rows x 37 bytes, MSB=leftmost x, bit1=white) ->
++// fb_accum layout (FLIP_X: panel row = 295-x, bit within row = y)
++static void wire_to_fb(const uint8_t *wire, uint8_t *fb) {
++    memset(fb, 0, EPD_BUFLEN);
++    for (int y = 0; y < EPD_COLS; y++) {
++        const uint8_t *row = wire + y * 37;
++        for (int x = 0; x < EPD_ROWS; x++) {
++            if ((row[x >> 3] >> (7 - (x & 7))) & 1) {
++                unsigned idx = (unsigned)(EPD_ROWS - 1 - x) * EPD_STRIDE + (y >> 3);
++                fb[idx] |= (uint8_t)(0x80 >> (y & 7));
++            }
++        }
++    }
++}
++
++void outpost_badge_load_custom(void) {
++    const uint8_t *c = CFG_XIP;
++    if (c[0] == 'O' && c[1] == 'P' && c[2] == 'B' && c[3] == '1' && (c[5] & 1)) {
++        active_badge_image = c + CFG_IMG_OFF;
++        badge_name_len = c[6] <= 63 ? c[6] : 0;
++        memcpy(badge_name, c + 8, badge_name_len);
++        badge_name[badge_name_len] = 0;
++    } else {
++        active_badge_image = badge_image;
++    }
++}
++
++static uint16_t crc16_ccitt(uint16_t crc, const uint8_t *d, int n) {
++    for (int i = 0; i < n; i++) {
++        crc ^= (uint16_t) d[i] << 8;
++        for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
++    }
++    return crc;
++}
++static void send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
++    uint8_t hdr[5] = { 'O', 'B', cmd, (uint8_t) len, (uint8_t)(len >> 8) };
++    uint16_t crc = crc16_ccitt(0xFFFF, hdr + 2, 3);
++    if (len) crc = crc16_ccitt(crc, payload, len);
++    for (int i = 0; i < 5; i++) putchar_raw(hdr[i]);
++    for (uint16_t i = 0; i < len; i++) putchar_raw(payload[i]);
++    putchar_raw((uint8_t) crc); putchar_raw((uint8_t)(crc >> 8));
++    stdio_flush();
++}
++
++static void handle_cmd(uint8_t cmd, uint8_t *p, uint16_t len) {
++    switch (cmd) {
++    case 0x01: { const char *id = "OUTPOST-ADV 1.0"; send_frame(0x81, (const uint8_t *) id, (uint16_t) strlen(id)); } break;
++    case 0x02: {
++        uint8_t info[5 + 64]; int n = 0;
++        info[n++] = 1; info[n++] = 0;
++        info[n++] = (active_badge_image != badge_image) ? 1 : 0;
++        info[n++] = eink_help_mode ? 2 : (eink_badge_mode ? 1 : 0);
++        info[n++] = badge_name_len;
++        memcpy(info + n, badge_name, badge_name_len); n += badge_name_len;
++        send_frame(0x82, info, (uint16_t) n);
++    } break;
++    case 0x10: {                                    // SET_IMAGE
++        uint8_t ok = 0;
++        if (len == EPD_BUFLEN) {
++            cfg_set_header(badge_name_len);
++            wire_to_fb(p, cfg_buf + CFG_IMG_OFF);
++            if (cfg_commit()) {
++                outpost_badge_load_custom();
++                eink_help_mode = 0; eink_badge_mode = 1; eink_badge_redraw = 1;
++                ok = 1;
++            }
++        }
++        send_frame(0x90, &ok, 1);
++    } break;
++    case 0x11: {                                    // SET_NAME
++        int nl = len > 63 ? 63 : len;
++        memcpy(badge_name, p, nl); badge_name[nl] = 0; badge_name_len = (uint8_t) nl;
++        uint8_t ok = 1;
++        if (active_badge_image != badge_image) {    // preserve stored image
++            cfg_set_header(nl);
++            memcpy(cfg_buf + CFG_IMG_OFF, active_badge_image, EPD_BUFLEN);
++            ok = cfg_commit() ? 1 : 0;
++            outpost_badge_load_custom();
++        }
++        send_frame(0x90, &ok, 1);
++    } break;
++    case 0x20: { eink_help_mode = 0; eink_badge_mode = 1; eink_badge_redraw = 1; uint8_t ok = 1; send_frame(0x90, &ok, 1); } break;
++    case 0x21: { eink_help_mode = 0; eink_badge_mode = 0; uint8_t ok = 1; send_frame(0x90, &ok, 1); } break;
++    case 0x22: { eink_help_mode = 1; uint8_t ok = 1; send_frame(0x90, &ok, 1); } break;
++    case 0x30: {                                    // CLEAR_CUSTOM
++        memset(cfg_buf, 0xFF, CFG_FLASH_SIZE);
++        uint8_t ok = cfg_commit() ? 1 : 0;
++        active_badge_image = badge_image; badge_name_len = 0; badge_name[0] = 0;
++        eink_badge_mode = 1; eink_badge_redraw = 1;
++        send_frame(0x90, &ok, 1);
++    } break;
++    case 0x31: reset_usb_boot(0, 0); break;         // REBOOT_BOOTSEL
++    default: break;
++    }
++}
++
++// Poll the USB CDC for a command frame. Called from the core-0 input loop; when
++// a frame starts arriving it drains the whole frame in a tight loop so the CDC
++// FIFO never overflows during a 4736-byte SET_IMAGE.
++void outpost_serial_poll(void) {
++    int c = getchar_timeout_us(0);
++    if (c < 0) return;
++    int guard = 0;
++    while (c != 'O') { c = getchar_timeout_us(2000); if (c < 0 || ++guard > 16000) return; }
++    c = getchar_timeout_us(2000); if (c != 'B') return;
++    int cmd = getchar_timeout_us(2000); if (cmd < 0) return;
++    int l0 = getchar_timeout_us(2000), l1 = getchar_timeout_us(2000);
++    if (l0 < 0 || l1 < 0) return;
++    uint16_t len = (uint16_t)(l0 | (l1 << 8));
++    if (len > EPD_BUFLEN) return;
++    static uint8_t payload[EPD_BUFLEN];
++    for (uint16_t i = 0; i < len; i++) { int b = getchar_timeout_us(8000); if (b < 0) return; payload[i] = (uint8_t) b; }
++    int cl = getchar_timeout_us(2000), ch = getchar_timeout_us(2000);
++    if (cl < 0 || ch < 0) return;
++    uint16_t rc = (uint16_t)(cl | (ch << 8));
++    uint8_t hh[3] = { (uint8_t) cmd, (uint8_t) l0, (uint8_t) l1 };
++    uint16_t calc = crc16_ccitt(0xFFFF, hh, 3);
++    if (len) calc = crc16_ccitt(calc, payload, len);
++    if (calc != rc) return;
++    handle_cmd((uint8_t) cmd, payload, len);
++}
++
 +void dispInit(int fps) {
 +    (void) fps;
 +    printf("eink: dispInit\n");
 +    outpost_nfc_init();                  // program the NFC tag once at boot
++    outpost_badge_load_custom();         // use the flash-stored badge if present
++    flash_safe_execute_core_init();      // core-1 becomes flash lockout victim
 +    // sampling maps
 +    memset(line_target, 0xFF, sizeof line_target);
 +    for (uint ty = 0; ty < EPD_COLS; ty++)
@@ -1221,7 +1381,7 @@ index 0000000..2f3ac82
 +    dither_bias = ((int) bri - 8) * 12;
 +}
 diff --git a/src/pico/i_input.c b/src/pico/i_input.c
-index 8280e8e..991df43 100644
+index 8280e8e..a53febc 100644
 --- a/src/pico/i_input.c
 +++ b/src/pico/i_input.c
 @@ -572,7 +572,7 @@ void I_GetEvent() {
@@ -1390,13 +1550,14 @@ index 8280e8e..991df43 100644
  #endif
  
  void I_GetEventTimeout(int key_timeout) {
-@@ -596,8 +746,26 @@ void I_GetEventTimeout(int key_timeout) {
+@@ -596,8 +746,27 @@ void I_GetEventTimeout(int key_timeout) {
      // this is a bit hacky, but just track the state
      // of each of the keys we care about, and select a different function
      // when the FN button is pressed
 +#ifdef OUTPOST_BADGE
 +    if (!outpost_btns_inited) outpost_btns_init();
 +    outpost_compute_vbtns();
++    { extern void outpost_serial_poll(void); outpost_serial_poll(); }
 +    {
 +        extern volatile uint32_t eink_lines_pumped, eink_frames_pushed;
 +        static uint32_t last_report;
@@ -1417,7 +1578,7 @@ index 8280e8e..991df43 100644
          uint last_sel = buttons[i/3];
          if (new_sel && !last_sel) {
              if (bdef[i+1] == SDL_SCANCODE_RSHIFT) mods |= WITH_SHIFT;
-@@ -616,12 +784,13 @@ void I_GetEventTimeout(int key_timeout) {
+@@ -616,12 +785,13 @@ void I_GetEventTimeout(int key_timeout) {
                  if (weapon_base != 7) weapon_base++;
              }
              if (menuactive) {

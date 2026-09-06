@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 120" width="200" height="120">
+  <rect width="200" height="120" fill="#fff"/>
+  <rect x="24" y="10" width="10" height="104" fill="#000"/>
+  <path d="M34 14 h150 l-26 26 26 26 h-150 z" fill="#000"/>
+  <text x="60" y="52" font-family="monospace" font-size="26" font-weight="700" fill="#fff">HACK</text>
+  <text x="40" y="96" font-family="monospace" font-size="17" font-weight="700" fill="#000">CLUB</text>
+</svg>

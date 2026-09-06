@@ -87,6 +87,17 @@ boundary (code+WAD overlapped → invalid image → bootloader rejected it). `pa
   On toggle, `eink.c` does a strong 2-pass clear (black→white full refresh) then
   draws the badge; leaving badge mode clears again before resuming Doom (so
   neither ghosts into the other).
+- **USB configuration (`eink.c`):** the "advanced" firmware exposes a framed
+  serial protocol over USB CDC (magic `OB`, CRC16-CCITT). `SET_IMAGE` (0x10)
+  receives a 296x128 1-bit image, converts screen-space→fb_accum, writes it to
+  the **last 8 KB of flash** (`0x1FE000`, past the WAD) via `flash_safe_execute`
+  (core-1 lockout), and displays it; it persists across reboot (`outpost_badge_
+  load_custom` at boot points `active_badge_image` at the flash copy). Also
+  PING/GET_INFO/SET_NAME/SHOW_*/CLEAR_CUSTOM/REBOOT_BOOTSEL. Verified on hardware.
+- **Dashboard (`dashboard/`):** SvelteKit + Cloudflare Worker at
+  **outpost.raygen.dev** — a canvas badge editor (layers, image dithering, logo
+  library, text, transform, live 1-bit preview) that exports the 4736-byte wire
+  image and pushes it over Web Serial, plus a drag-drop UF2 flow for blank badges.
 
 ## Reflash loop (no manual BOOTSEL needed while firmware runs)
 
