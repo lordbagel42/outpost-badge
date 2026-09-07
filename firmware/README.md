@@ -16,18 +16,18 @@ A/B runs at matched frame rates. No optical instrument was used.
 
 ## What is proven
 
-| Item | Status |
-|---|---|
-| RP2354A, USB, internal flash, CircuitPython | works |
-| SSD1680 panel, full refresh | works, 2.29 s |
-| SSD1680 partial refresh | works, 0.617 s stock |
-| Fast partial refresh, 9.4 fps | works — see [epaper/README.md](epaper/README.md) |
-| Animation demos (gradient, ball) | work |
-| Playable game at ~9 fps | works |
-| Buttons | works — all six, switch-to-ground (pull-up, active low) |
-| NFC (ST25DV04K) and the LED behind it | not tried |
-| Behaviour at low temperature | not tried |
-| Long-term panel safety of the short waveform | argued, not measured |
+| Item                                         | Status                                                  |
+| -------------------------------------------- | ------------------------------------------------------- |
+| RP2354A, USB, internal flash, CircuitPython  | works                                                   |
+| SSD1680 panel, full refresh                  | works, 2.29 s                                           |
+| SSD1680 partial refresh                      | works, 0.617 s stock                                    |
+| Fast partial refresh, 9.4 fps                | works — see [epaper/README.md](epaper/README.md)        |
+| Animation demos (gradient, ball)             | work                                                    |
+| Playable game at ~9 fps                      | works                                                   |
+| Buttons                                      | works — all six, switch-to-ground (pull-up, active low) |
+| NFC (ST25DV04K) and the LED behind it        | not tried                                               |
+| Behaviour at low temperature                 | not tried                                               |
+| Long-term panel safety of the short waveform | argued, not measured                                    |
 
 ## Board facts
 
@@ -40,22 +40,22 @@ A/B runs at matched frame rates. No optical instrument was used.
 
 ### Pin map
 
-| Signal | GPIO | Note |
-|---|---|---|
-| E-paper CS | GP13 | |
-| E-paper SCK | GP14 | SPI1 SCK |
-| E-paper MOSI | GP15 | SPI1 TX |
-| E-paper BUSY | GP16 | high means busy |
-| E-paper D/C | GP17 | |
-| E-paper RST | GP18 | active low |
-| Button up | GP7 | |
-| Button left | GP8 | |
-| Button right | GP6 | |
-| Button down | GP9 | |
-| Button A | GP5 | |
-| Button B | GP4 | |
-| NFC ST25DV04K | GP10, GP11 | I2C |
-| NFC GPO | GP12 | |
+| Signal        | GPIO       | Note            |
+| ------------- | ---------- | --------------- |
+| E-paper CS    | GP13       |                 |
+| E-paper SCK   | GP14       | SPI1 SCK        |
+| E-paper MOSI  | GP15       | SPI1 TX         |
+| E-paper BUSY  | GP16       | high means busy |
+| E-paper D/C   | GP17       |                 |
+| E-paper RST   | GP18       | active low      |
+| Button up     | GP7        |                 |
+| Button left   | GP8        |                 |
+| Button right  | GP6        |                 |
+| Button down   | GP9        |                 |
+| Button A      | GP5        |                 |
+| Button B      | GP4        |                 |
+| NFC ST25DV04K | GP10, GP11 | I2C             |
+| NFC GPO       | GP12       |                 |
 
 The buttons are wired switch-to-ground: enable an internal pull-up and read a
 press as a low level. Confirmed on hardware by playing `epaper/examples/flappy.py`.
@@ -184,7 +184,7 @@ The first two are explained with measurements in
 ## If the panel looks wrong
 
 - **Ghosting or faint leftover images** — run `./firmware/tools/deploy.sh
-  recondition`.
+recondition`.
 - **A weak or invisible full refresh** — a missing `epd.init()`; see rule 2.
 - **Motion stops after a few seconds** — a missing old-RAM sync; see rule 1.
 - **Everything mirrored** — `FLIP_X` / `FLIP_Y` in `epaper/examples/flappy.py`. Note

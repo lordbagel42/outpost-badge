@@ -41,6 +41,14 @@
 #define PICO_DEFAULT_I2C_SCL_PIN 29
 #endif
 
+// --- AUDIO --- (no speaker on this badge; PWM goes to an unused pin)
+#ifndef PICO_AUDIO_PWM_L_PIN
+#define PICO_AUDIO_PWM_L_PIN 27
+#endif
+#ifndef PICO_AUDIO_PWM_MONO_PIN
+#define PICO_AUDIO_PWM_MONO_PIN 27
+#endif
+
 // --- FLASH --- 2MB internal (stacked die), standard BOOTSEL bootloader
 #define PICO_BOOT_STAGE2_CHOOSE_W25Q080 1
 

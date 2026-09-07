@@ -19,6 +19,6 @@
 #define PIN_BTN_B       4
 
 // hardware alarm used to pace the scanline pump (alarm pool is disabled)
-#define EINK_ALARM_NUM  3
+#define EINK_ALARM_NUM  2
 
 #endif

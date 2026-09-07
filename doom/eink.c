@@ -22,12 +22,28 @@
 #include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
+#include "hardware/i2c.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/structs/timer.h"
+#include "hardware/flash.h"
+#include "pico/flash.h"
+#include "pico/bootrom.h"
 #include "pinoutOutpost.h"
 #include "lcd.h"
 #include "doom/doomstat.h"      // brightnessLevel
+#include "badge_image.h"        // static name-badge (296x128, fb_accum layout)
+
+// Custom badge image + name, configured over USB and stored in the last 8 KB of
+// flash (0x101FE000), which sits past the 1.8 MB DOOM WAD (ends ~0x101FBA00).
+// active_badge_image points at the baked image, or the flash copy when set.
+#define CFG_FLASH_OFFSET  ((2u * 1024 * 1024) - (8u * 1024))   // 0x1FE000
+#define CFG_FLASH_SIZE    (8u * 1024)
+#define CFG_XIP           ((const uint8_t *)(XIP_BASE + CFG_FLASH_OFFSET))
+#define CFG_IMG_OFF       256
+const uint8_t *active_badge_image = badge_image;
+static char badge_name[64];
+static uint8_t badge_name_len;
 
 #define EPD_SPI         spi1
 #define EPD_BAUD        20000000
@@ -73,7 +89,15 @@ static const uint8_t wf_partial[159] = {
 // speed/contrast trade (see epaper/README.md in the badge repo)
 #define WF_TPA          2       // group 0 drive frames
 #define WF_FRAME_RATE   0x44
-#define WF_GROUPS       1       // drop group 1 hold pulse + group 2
+#define WF_GROUPS       3       // keep both hold pulses: 9.4fps "milestone" contrast
+
+// Post-process for clarity: linear contrast stretch around mid-gray applied to
+// luma BEFORE the ordered dither. Ordered (Bayer) dither is temporally stable,
+// so static pixels stay identical frame-to-frame (no shimmer/extra ghosting) --
+// unlike error diffusion. gain = EINK_CONTRAST_NUM / (1 << EINK_CONTRAST_SHIFT).
+#define EINK_CONTRAST_NUM   3
+#define EINK_CONTRAST_SHIFT 1   // 3>>1 = 1.5x
+#define EINK_LUMA_MID       124 // midpoint of the 0..248 luma range
 
 static uint8_t fb_accum[EPD_BUFLEN];    // dither target (bit 1 = white)
 static uint8_t fb_sent[EPD_BUFLEN];     // snapshot on the panel / in old RAM
@@ -99,6 +123,26 @@ extern void fill_scanlines(void);
 // debug counters, printed from the core-0 input poll
 volatile uint32_t eink_lines_pumped, eink_frames_pushed;
 
+// set by the core-0 input poll (hold U+R+A+B >3s); serviced in epd_poll on
+// core 1: do one full-strength panel reset to wipe accumulated ghosting.
+volatile uint8_t eink_clear_request;
+
+// name-badge takeover ("kill Doom"): 1 = show the static badge, 0 = play Doom.
+// Defaults to 1 so the badge is what shows on boot; toggled by the core-0 input
+// poll (hold L+R+A+B >3s) and serviced in epd_poll.
+volatile uint8_t eink_badge_mode = 1;
+// dark-mode badge: 1 = inverted (black bg / white art). Double-tap A in badge
+// mode toggles it; eink_badge_redraw asks epd_poll to repaint.
+volatile uint8_t eink_badge_invert;
+volatile uint8_t eink_badge_redraw;
+
+// light/dark for the Doom view: 0 = normal, 1 = inverted. Toggled by the core-0
+// input poll (hold UP + triple-tap A); Doom frames pick it up on the next pump.
+volatile uint8_t eink_invert;
+
+// chord-list overlay: 1 = show the help screen. Toggled by DOWN + triple-tap A.
+volatile uint8_t eink_help_mode;
+
 // verify the flashed WHX region before anything parses it (called from i_main)
 void outpost_wad_check(void) {
 #ifdef TINY_WAD_ADDR
@@ -108,6 +152,53 @@ void outpost_wad_check(void) {
     printf("WAD region: %02x %02x %02x %02x checksum %08x\n",
            w[0], w[1], w[2], w[3], (unsigned) sum);
 #endif
+}
+
+// ---- NFC: program the ST25DV04K so a phone scan opens the URL --------------
+// One-shot at boot: write an NDEF URI record to the tag EEPROM over I2C
+// (GP10 SDA / GP11 SCL = i2c1). Untested silicon per firmware/README, so it
+// probes first and skips quietly if the tag does not answer.
+#define NFC_I2C      i2c1
+#define NFC_SDA_PIN  10
+#define NFC_SCL_PIN  11
+#define ST25DV_ADDR  0x53               // user-memory I2C device address (7-bit)
+
+static bool st25dv_write_byte(uint16_t addr, uint8_t v) {
+    uint8_t buf[3] = { (uint8_t)(addr >> 8), (uint8_t) addr, v };
+    if (i2c_write_blocking(NFC_I2C, ST25DV_ADDR, buf, 3, false) < 0) return false;
+    // EEPROM write cycle (tW <= 5 ms): ACK-poll until the device answers again
+    absolute_time_t dl = make_timeout_time_ms(20);
+    uint8_t t;
+    while (!time_reached(dl))
+        if (i2c_read_blocking(NFC_I2C, ST25DV_ADDR, &t, 1, false) >= 0) return true;
+    return false;
+}
+
+static void outpost_nfc_init(void) {
+    static bool done;
+    if (done) return;
+    done = true;
+    i2c_init(NFC_I2C, 100 * 1000);
+    gpio_set_function(NFC_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(NFC_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(NFC_SDA_PIN);
+    gpio_pull_up(NFC_SCL_PIN);
+    // capability container + one URI record for https://link.raygen.dev
+    static const uint8_t ndef[] = {
+        0xE1, 0x40, 0x40, 0x00,             // T5T capability container
+        0x03, 0x14,                         // NDEF-message TLV, length 20
+        0xD1, 0x01, 0x10, 0x55, 0x04,       // URI record, well-known 'U', https:// prefix
+        'l','i','n','k','.','r','a','y','g','e','n','.','d','e','v',
+        0xFE                                // terminator TLV
+    };
+    uint8_t probe;
+    if (i2c_read_blocking(NFC_I2C, ST25DV_ADDR, &probe, 1, false) < 0) {
+        printf("nfc: ST25DV not responding on i2c1\n");
+        return;
+    }
+    for (uint16_t i = 0; i < sizeof ndef; i++)
+        if (!st25dv_write_byte(i, ndef[i])) { printf("nfc: write failed @%u\n", (unsigned) i); return; }
+    printf("nfc: NDEF written -> https://link.raygen.dev\n");
 }
 
 // ---- low-level panel access -------------------------------------------
@@ -222,13 +313,209 @@ static void epd_base_white(void) {
 
 // ---- frame push state machine ------------------------------------------
 
+// one full-strength refresh to `buf` (factory LUT, sets only new RAM like the
+// reference display_full -- setting old==new makes the controller skip
+// unchanged pixels, which leaves ghosts).
+static void epd_full_refresh(const uint8_t *buf) {
+    epd_set_window_full();
+    epd_cmd(0x24, buf, EPD_BUFLEN);
+    epd_cmd1(0x22, 0xF7);
+    epd_cmd(0x20, NULL, 0);
+    epd_wait();
+}
+
+// strong two-pass clear (drive every pixel black, then white) to shake out
+// accumulated ghosting; leaves the panel white with old RAM seeded white.
+// Caller must have run epd_init_regs() first (factory LUT).
+static void epd_clear_panel(void) {
+    memset(fb_sent, 0x00, EPD_BUFLEN); epd_full_refresh(fb_sent);   // all black
+    memset(fb_sent, 0xFF, EPD_BUFLEN); epd_full_refresh(fb_sent);   // all white
+    memset(fb_accum, 0xFF, EPD_BUFLEN);
+    epd_set_window_full();
+    epd_cmd(0x26, fb_sent, EPD_BUFLEN);                             // old RAM = white
+}
+
+// deep recondition: N balanced black/white full-refresh inversions to clear
+// ghosting and regional one-way bias (firmware version of recondition.py).
+// Caller runs epd_init_regs() first; ends white with old RAM seeded white.
+#define RECOND_CYCLES 6
+static void epd_recondition(void) {
+    for (int i = 0; i < RECOND_CYCLES; i++) {
+        memset(fb_sent, 0x00, EPD_BUFLEN); epd_full_refresh(fb_sent);   // black
+        memset(fb_sent, 0xFF, EPD_BUFLEN); epd_full_refresh(fb_sent);   // white
+    }
+    memset(fb_accum, 0xFF, EPD_BUFLEN);
+    epd_set_window_full();
+    epd_cmd(0x26, fb_sent, EPD_BUFLEN);
+}
+
+// paint the badge (light, or inverted for dark mode) with one full refresh.
+static void epd_redraw_badge(void) {
+    // border region (0x3C) can't be addressed by the image -> drive it black in
+    // dark mode so it doesn't leave a white frame; white (0x05) in light mode.
+    epd_cmd1(0x3C, eink_badge_invert ? 0x00 : 0x05);
+    for (unsigned i = 0; i < EPD_BUFLEN; i++)
+        fb_sent[i] = eink_badge_invert ? (uint8_t) ~active_badge_image[i] : active_badge_image[i];
+    memcpy(fb_accum, fb_sent, EPD_BUFLEN);
+    epd_full_refresh(fb_sent);
+    epd_set_window_full();
+    epd_cmd(0x26, fb_sent, EPD_BUFLEN); // old RAM = what's shown
+}
+
+// "kill Doom": clear the panel hard, then draw the static badge.
+static void epd_show_badge(void) {
+    epd_init_regs();                    // SW reset -> factory LUT from OTP
+    epd_clear_panel();                  // wipe Doom's ghost (incl. the status bar)
+    epd_redraw_badge();                 // light or dark per eink_badge_invert
+}
+
+// leaving badge mode: clear the badge off the panel, then re-arm fast partial
+// so Doom redraws onto a clean white field.
+static void epd_resume_doom(void) {
+    epd_init_regs();
+    epd_clear_panel();                  // wipe the badge (else it ghosts under Doom)
+    epd_arm_partial();                  // charge pump up, short LUT reloaded
+}
+
+// ---- chord-list help overlay (DOWN + triple-tap A) ------------------------
+// Tiny 5x7 font, black ink on white. Screen x runs along the 296 axis, y along
+// the 128 axis, with the same FLIP_X mapping as the Doom/badge render path.
+static const uint8_t help_font[][7] = {
+    {0,0,0,0,0,0,0},                                 // ' '
+    {0x1E,0x01,0x01,0x0E,0x01,0x01,0x1E},            // '3'
+    {0x00,0x04,0x04,0x1F,0x04,0x04,0x00},            // '+'
+    {0x01,0x01,0x02,0x04,0x08,0x10,0x10},            // '/'
+    {0x0E,0x11,0x11,0x1F,0x11,0x11,0x11},            // 'A'
+    {0x1E,0x11,0x11,0x1E,0x11,0x11,0x1E},            // 'B'
+    {0x0E,0x11,0x10,0x10,0x10,0x11,0x0E},            // 'C'
+    {0x1C,0x12,0x11,0x11,0x11,0x12,0x1C},            // 'D'
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x1F},            // 'E'
+    {0x1F,0x10,0x10,0x1E,0x10,0x10,0x10},            // 'F'
+    {0x0E,0x11,0x10,0x17,0x11,0x11,0x0F},            // 'G'
+    {0x11,0x11,0x11,0x1F,0x11,0x11,0x11},            // 'H'
+    {0x1F,0x04,0x04,0x04,0x04,0x04,0x1F},            // 'I'
+    {0x11,0x12,0x14,0x18,0x14,0x12,0x11},            // 'K'
+    {0x10,0x10,0x10,0x10,0x10,0x10,0x1F},            // 'L'
+    {0x11,0x1B,0x15,0x15,0x11,0x11,0x11},            // 'M'
+    {0x11,0x11,0x19,0x15,0x13,0x11,0x11},            // 'N'
+    {0x0E,0x11,0x11,0x11,0x11,0x11,0x0E},            // 'O'
+    {0x1E,0x11,0x11,0x1E,0x10,0x10,0x10},            // 'P'
+    {0x1E,0x11,0x11,0x1E,0x14,0x12,0x11},            // 'R'
+    {0x0F,0x10,0x10,0x0E,0x01,0x01,0x1E},            // 'S'
+    {0x1F,0x04,0x04,0x04,0x04,0x04,0x04},            // 'T'
+    {0x11,0x11,0x11,0x11,0x11,0x11,0x0E},            // 'U'
+    {0x11,0x11,0x11,0x15,0x15,0x1B,0x11},            // 'W'
+    {0x04,0x0E,0x1F,0x04,0x04,0x04,0x04},            // up    '\1'
+    {0x04,0x04,0x04,0x04,0x1F,0x0E,0x04},            // down  '\2'
+    {0x04,0x0C,0x1F,0x0C,0x04,0x00,0x00},            // left  '\3'
+    {0x04,0x06,0x1F,0x06,0x04,0x00,0x00},            // right '\4'
+};
+static const char help_idx[] = " 3+/ABCDEFGHIKLMNOPRSTUW";  // parallel to help_font
+
+static const uint8_t *help_glyph(char c) {
+    if ((uint8_t) c >= 1 && (uint8_t) c <= 4) return help_font[24 + (uint8_t) c - 1];
+    for (int i = 0; help_idx[i]; i++) if (help_idx[i] == c) return help_font[i];
+    return help_font[0];
+}
+static void help_draw_char(uint8_t *buf, int ox, int oy, char c) {
+    const uint8_t *g = help_glyph(c);
+    for (int ry = 0; ry < 7; ry++)
+        for (int rx = 0; rx < 5; rx++)
+            if (g[ry] & (0x10 >> rx)) {
+                int sx = ox + rx, sy = oy + ry;
+                if (sx < 0 || sx >= EPD_ROWS || sy < 0 || sy >= EPD_COLS) continue;
+                uint idx = (EPD_ROWS - 1 - sx) * EPD_STRIDE + (sy >> 3);
+                buf[idx] &= ~(0x80 >> (sy & 7));   // black ink (bit 1 = white)
+            }
+}
+static void help_draw_str(uint8_t *buf, int ox, int oy, const char *s) {
+    for (; *s; s++, ox += 6) help_draw_char(buf, ox, oy, *s);
+}
+static void help_render(uint8_t *buf) {
+    static const char *const lines[] = {
+        "CHORDS",
+        "\1 FWD   \2 BACK",
+        "\3 \4 TURN",
+        "A USE   B FIRE",
+        "\1\2 STRAFE  +B WEAPON",
+        "\3\4 MENU",
+        "\1\4 AB 3S RESET",
+        "\3\4 AB 3S BADGE",
+        "\1\2 AB BOOTSEL",
+        "\1 +AAA LIGHT/DARK",
+        "\2 +AAA THIS LIST",
+    };
+    memset(buf, 0xFF, EPD_BUFLEN);
+    int oy = 3;
+    for (unsigned i = 0; i < sizeof lines / sizeof lines[0]; i++, oy += 11)
+        help_draw_str(buf, 4, oy, lines[i]);
+}
+
+// clear the panel and show the chord list; held until DOWN + triple-tap A again.
+static void epd_show_help(void) {
+    epd_init_regs();
+    epd_clear_panel();
+    epd_cmd1(0x3C, (eink_invert & 1) ? 0x00 : 0x05);   // border matches polarity
+    help_render(fb_sent);
+    if (eink_invert & 1)
+        for (unsigned i = 0; i < EPD_BUFLEN; i++) fb_sent[i] ^= 0xFF;
+    memcpy(fb_accum, fb_sent, EPD_BUFLEN);
+    epd_full_refresh(fb_sent);
+    epd_set_window_full();
+    epd_cmd(0x26, fb_sent, EPD_BUFLEN);
+}
+
 static void __not_in_flash_func(epd_poll)(void) {
+    static uint8_t badge_shown;
+    static uint8_t help_shown;
+    if (eink_help_mode) {               // chord-list overlay takes over the panel
+        if (!help_shown) {
+            if (epd_state == EPD_UPDATING) { if (epd_busy()) return; epd_state = EPD_IDLE; }
+            epd_show_help();
+            help_shown = 1;
+        }
+        return;
+    }
+    if (help_shown) {                   // leaving help -> back to badge or Doom
+        help_shown = 0;
+        if (eink_badge_mode) badge_shown = 0;   // force the badge to repaint below
+        else { epd_resume_doom(); epd_state = EPD_IDLE; frame_dirty = false; }
+    }
+    if (eink_badge_mode) {              // "kill Doom": show the static badge, hold it
+        if (!badge_shown) {
+            if (epd_state == EPD_UPDATING) { if (epd_busy()) return; epd_state = EPD_IDLE; }
+            epd_show_badge();
+            badge_shown = 1;
+            eink_badge_redraw = 0;
+        } else if (eink_badge_redraw) { // UP + triple-tap A toggled dark mode -> repaint
+            eink_badge_redraw = 0;
+            epd_redraw_badge();
+        }
+        return;
+    }
+    if (badge_shown) {                  // leaving badge mode -> resume Doom
+        epd_resume_doom();
+        epd_state = EPD_IDLE;
+        frame_dirty = false;
+        badge_shown = 0;
+    }
     if (epd_state == EPD_UPDATING) {
         if (epd_busy()) return;
         // update done: bring old RAM in sync so static pixels stay undriven
         epd_set_window_full();
         epd_cmd(0x26, fb_sent, EPD_BUFLEN);
         epd_state = EPD_IDLE;
+    }
+    if (epd_state == EPD_IDLE && eink_clear_request) {
+        eink_clear_request = 0;
+        // firmware recondition (hold U+R+A+B): balanced black/white inversions to
+        // clear ghosting AND regional one-way bias (the "rough bottom"), then
+        // re-arm the fast partial path so Doom redraws clean. ~28 s.
+        epd_init_regs();      // SW reset -> factory LUT from OTP
+        epd_recondition();    // RECOND_CYCLES balanced inversions, ends white
+        epd_arm_partial();    // reload short custom LUT, charge pump back up
+        frame_dirty = false;  // drop stale frame; the pump redraws the live scene
+        return;
     }
     if (epd_state == EPD_IDLE && frame_dirty) {
         frame_dirty = false;
@@ -259,18 +546,21 @@ void dispWaitLine(void) {
 // y: doom scanline 0..199; buf: 320 pixels, 5:5:5 at shifts 11/6/0
 void __not_in_flash_func(dispRenderLine)(uint y, uint16_t *buf, uint32_t width) {
     uint ty = line_target[y < SRC_H ? y : SRC_H - 1];
-    if (ty != 0xFF) {
+    if (!eink_badge_mode && !eink_help_mode && ty != 0xFF) {
         const uint8_t *brow = &bayer4[(ty & 3) * 4];
         int bias = dither_bias;
         for (uint tx = 0; tx < EPD_ROWS; tx++) {
             uint16_t p = buf[xmap[tx]];
             int r = (p >> 11) & 31, g = (p >> 6) & 31, b = p & 31;
             int luma = (r * 77 + g * 151 + b * 28) >> 5;    // 0..248
+            // contrast stretch around mid-gray for a crisper 1-bit image
+            luma = EINK_LUMA_MID +
+                   (((luma - EINK_LUMA_MID) * EINK_CONTRAST_NUM) >> EINK_CONTRAST_SHIFT);
             int t = brow[tx & 3] * 16 + 8;
             // screen x -> panel row 295-x (FLIP_X, matches the badge firmware)
             uint idx = (EPD_ROWS - 1 - tx) * EPD_STRIDE + (ty >> 3);
             uint8_t m = 0x80 >> (ty & 7);
-            if (luma + bias >= t)
+            if ((luma + bias >= t) ^ (eink_invert & 1))
                 fb_accum[idx] |= m;     // white
             else
                 fb_accum[idx] &= ~m;
@@ -305,9 +595,156 @@ void gpiosConfig(bool firstTime) {
     }
 }
 
+// ===================== custom badge: flash storage + USB serial =============
+static uint8_t cfg_buf[CFG_FLASH_SIZE];   // RAM staging for one flash sector write
+
+static void __not_in_flash_func(cfg_do_flash)(void *unused) {
+    (void) unused;
+    flash_range_erase(CFG_FLASH_OFFSET, CFG_FLASH_SIZE);
+    flash_range_program(CFG_FLASH_OFFSET, cfg_buf, CFG_FLASH_SIZE);
+}
+static bool cfg_commit(void) {
+    return flash_safe_execute(cfg_do_flash, NULL, 3000) == PICO_OK;
+}
+static void cfg_set_header(int namelen) {
+    memset(cfg_buf, 0xFF, CFG_FLASH_SIZE);
+    cfg_buf[0] = 'O'; cfg_buf[1] = 'P'; cfg_buf[2] = 'B'; cfg_buf[3] = '1';
+    cfg_buf[4] = 1;                       // version
+    cfg_buf[5] = 1;                       // flags: has_image
+    if (namelen > 63) namelen = 63;
+    cfg_buf[6] = (uint8_t) namelen; cfg_buf[7] = 0;
+    memset(cfg_buf + 8, 0, 256 - 8);
+    if (namelen) memcpy(cfg_buf + 8, badge_name, namelen);
+}
+
+// screen-space wire image (128 rows x 37 bytes, MSB=leftmost x, bit1=white) ->
+// fb_accum layout (FLIP_X: panel row = 295-x, bit within row = y)
+static void wire_to_fb(const uint8_t *wire, uint8_t *fb) {
+    memset(fb, 0, EPD_BUFLEN);
+    for (int y = 0; y < EPD_COLS; y++) {
+        const uint8_t *row = wire + y * 37;
+        for (int x = 0; x < EPD_ROWS; x++) {
+            if ((row[x >> 3] >> (7 - (x & 7))) & 1) {
+                unsigned idx = (unsigned)(EPD_ROWS - 1 - x) * EPD_STRIDE + (y >> 3);
+                fb[idx] |= (uint8_t)(0x80 >> (y & 7));
+            }
+        }
+    }
+}
+
+void outpost_badge_load_custom(void) {
+    const uint8_t *c = CFG_XIP;
+    if (c[0] == 'O' && c[1] == 'P' && c[2] == 'B' && c[3] == '1' && (c[5] & 1)) {
+        active_badge_image = c + CFG_IMG_OFF;
+        badge_name_len = c[6] <= 63 ? c[6] : 0;
+        memcpy(badge_name, c + 8, badge_name_len);
+        badge_name[badge_name_len] = 0;
+    } else {
+        active_badge_image = badge_image;
+    }
+}
+
+static uint16_t crc16_ccitt(uint16_t crc, const uint8_t *d, int n) {
+    for (int i = 0; i < n; i++) {
+        crc ^= (uint16_t) d[i] << 8;
+        for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021) : (uint16_t)(crc << 1);
+    }
+    return crc;
+}
+static void send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
+    uint8_t hdr[5] = { 'O', 'B', cmd, (uint8_t) len, (uint8_t)(len >> 8) };
+    uint16_t crc = crc16_ccitt(0xFFFF, hdr + 2, 3);
+    if (len) crc = crc16_ccitt(crc, payload, len);
+    for (int i = 0; i < 5; i++) putchar_raw(hdr[i]);
+    for (uint16_t i = 0; i < len; i++) putchar_raw(payload[i]);
+    putchar_raw((uint8_t) crc); putchar_raw((uint8_t)(crc >> 8));
+    stdio_flush();
+}
+
+static void handle_cmd(uint8_t cmd, uint8_t *p, uint16_t len) {
+    switch (cmd) {
+    case 0x01: { const char *id = "OUTPOST-ADV 1.0"; send_frame(0x81, (const uint8_t *) id, (uint16_t) strlen(id)); } break;
+    case 0x02: {
+        uint8_t info[5 + 64]; int n = 0;
+        info[n++] = 1; info[n++] = 0;
+        info[n++] = (active_badge_image != badge_image) ? 1 : 0;
+        info[n++] = eink_help_mode ? 2 : (eink_badge_mode ? 1 : 0);
+        info[n++] = badge_name_len;
+        memcpy(info + n, badge_name, badge_name_len); n += badge_name_len;
+        send_frame(0x82, info, (uint16_t) n);
+    } break;
+    case 0x10: {                                    // SET_IMAGE
+        uint8_t ok = 0;
+        if (len == EPD_BUFLEN) {
+            cfg_set_header(badge_name_len);
+            wire_to_fb(p, cfg_buf + CFG_IMG_OFF);
+            if (cfg_commit()) {
+                outpost_badge_load_custom();
+                eink_help_mode = 0; eink_badge_mode = 1; eink_badge_redraw = 1;
+                ok = 1;
+            }
+        }
+        send_frame(0x90, &ok, 1);
+    } break;
+    case 0x11: {                                    // SET_NAME
+        int nl = len > 63 ? 63 : len;
+        memcpy(badge_name, p, nl); badge_name[nl] = 0; badge_name_len = (uint8_t) nl;
+        uint8_t ok = 1;
+        if (active_badge_image != badge_image) {    // preserve stored image
+            cfg_set_header(nl);
+            memcpy(cfg_buf + CFG_IMG_OFF, active_badge_image, EPD_BUFLEN);
+            ok = cfg_commit() ? 1 : 0;
+            outpost_badge_load_custom();
+        }
+        send_frame(0x90, &ok, 1);
+    } break;
+    case 0x20: { eink_help_mode = 0; eink_badge_mode = 1; eink_badge_redraw = 1; uint8_t ok = 1; send_frame(0x90, &ok, 1); } break;
+    case 0x21: { eink_help_mode = 0; eink_badge_mode = 0; uint8_t ok = 1; send_frame(0x90, &ok, 1); } break;
+    case 0x22: { eink_help_mode = 1; uint8_t ok = 1; send_frame(0x90, &ok, 1); } break;
+    case 0x30: {                                    // CLEAR_CUSTOM
+        memset(cfg_buf, 0xFF, CFG_FLASH_SIZE);
+        uint8_t ok = cfg_commit() ? 1 : 0;
+        active_badge_image = badge_image; badge_name_len = 0; badge_name[0] = 0;
+        eink_badge_mode = 1; eink_badge_redraw = 1;
+        send_frame(0x90, &ok, 1);
+    } break;
+    case 0x31: reset_usb_boot(0, 0); break;         // REBOOT_BOOTSEL
+    default: break;
+    }
+}
+
+// Poll the USB CDC for a command frame. Called from the core-0 input loop; when
+// a frame starts arriving it drains the whole frame in a tight loop so the CDC
+// FIFO never overflows during a 4736-byte SET_IMAGE.
+void outpost_serial_poll(void) {
+    int c = getchar_timeout_us(0);
+    if (c < 0) return;
+    int guard = 0;
+    while (c != 'O') { c = getchar_timeout_us(2000); if (c < 0 || ++guard > 16000) return; }
+    c = getchar_timeout_us(2000); if (c != 'B') return;
+    int cmd = getchar_timeout_us(2000); if (cmd < 0) return;
+    int l0 = getchar_timeout_us(2000), l1 = getchar_timeout_us(2000);
+    if (l0 < 0 || l1 < 0) return;
+    uint16_t len = (uint16_t)(l0 | (l1 << 8));
+    if (len > EPD_BUFLEN) return;
+    static uint8_t payload[EPD_BUFLEN];
+    for (uint16_t i = 0; i < len; i++) { int b = getchar_timeout_us(8000); if (b < 0) return; payload[i] = (uint8_t) b; }
+    int cl = getchar_timeout_us(2000), ch = getchar_timeout_us(2000);
+    if (cl < 0 || ch < 0) return;
+    uint16_t rc = (uint16_t)(cl | (ch << 8));
+    uint8_t hh[3] = { (uint8_t) cmd, (uint8_t) l0, (uint8_t) l1 };
+    uint16_t calc = crc16_ccitt(0xFFFF, hh, 3);
+    if (len) calc = crc16_ccitt(calc, payload, len);
+    if (calc != rc) return;
+    handle_cmd((uint8_t) cmd, payload, len);
+}
+
 void dispInit(int fps) {
     (void) fps;
     printf("eink: dispInit\n");
+    outpost_nfc_init();                  // program the NFC tag once at boot
+    outpost_badge_load_custom();         // use the flash-stored badge if present
+    flash_safe_execute_core_init();      // core-1 becomes flash lockout victim
     // sampling maps
     memset(line_target, 0xFF, sizeof line_target);
     for (uint ty = 0; ty < EPD_COLS; ty++)
@@ -322,10 +759,10 @@ void dispInit(int fps) {
     dispSetBrightness((uint8_t) brightnessLevel);
 
     epd_init_regs();
-    printf("eink: regs done, base refresh...\n");
-    epd_base_white();                    // clean slate + seed old RAM
-    printf("eink: base refresh done\n");
-    epd_arm_partial();                   // charge pump up, short LUT loaded
+    // Boot defaults to the name badge (eink_badge_mode = 1): the first epd_poll
+    // runs epd_show_badge(), which does the boot clean (black->white) and draws
+    // the badge. Doom re-arms fast partial via epd_resume_doom() on the L+R+A+B
+    // toggle, so no base_white / arm_partial is needed here.
     epd_state = EPD_IDLE;
     frame_dirty = false;
 

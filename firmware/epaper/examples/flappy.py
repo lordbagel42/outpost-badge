@@ -273,7 +273,12 @@ def play():
     # first partial frame then draws the scene normally.
     FRAME[:] = BG
     epd.display_base(BG)                    # seeds BOTH RAMs, panel = BG
-    epd.arm_partial(tpa=2, frame_rate=0x44, groups=None)
+    # groups=1 drops LUT group 1, which drives UNCHANGED pixels one way
+    # every frame and never balances them. Three groups gave visibly darker
+    # bands wherever content sat still (see ../README.md). tpa=3 spends the
+    # freed time on drive instead, so this runs at the same 9.4 fps and
+    # looked the same in an A/B test at matched frame rate.
+    epd.arm_partial(tpa=3, frame_rate=0x44, groups=1)
 
     frames = 0
     cpu = 0.0

@@ -507,7 +507,7 @@ class SSD1680:
         contrast/speed trade -- see load_partial_lut(). Known-good setting,
         confirmed by eye at 9.4 fps:
 
-            epd.arm_partial(tpa=2, frame_rate=0x44, groups=None)
+            epd.arm_partial(tpa=3, frame_rate=0x44, groups=1)
 
         WARNING: this leaves the custom LUT in register 0x32 and overwrites the
         voltage registers 0x03/0x04/0x2C. They stay loaded until init() does a
