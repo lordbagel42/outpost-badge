@@ -165,6 +165,85 @@ export const PRESETS: Preset[] = [
 		})
 	},
 	{
+		id: 'namebadge',
+		label: 'Name Badge (your photo)',
+		build: () => ({
+			version: 1,
+			background: 'white',
+			global: { mode: 'threshold', threshold: 128, invert: false },
+			layers: [
+				{
+					id: uid('s'),
+					type: 'shape',
+					name: 'Photo frame',
+					x: 168,
+					y: 0,
+					width: 128,
+					height: 128,
+					rotation: 0,
+					visible: true,
+					opacity: 1,
+					locked: false,
+					dither: 'inherit',
+					threshold: 128,
+					invert: false,
+					shape: 'rect',
+					fill: 'none',
+					stroke: 'black',
+					strokeWidth: 2,
+					radius: 0
+				} as Layer,
+				baseText({
+					name: 'Photo hint',
+					text: 'UPLOAD PHOTO',
+					x: 176,
+					y: 58,
+					width: 112,
+					height: 14,
+					fontSize: 12,
+					font: "'IBM Plex Mono', monospace",
+					weight: 400,
+					align: 'center'
+				}),
+				{
+					id: uid('s'),
+					type: 'shape',
+					name: 'Divider',
+					x: 166,
+					y: 0,
+					width: 1,
+					height: 128,
+					rotation: 0,
+					visible: true,
+					opacity: 1,
+					locked: false,
+					dither: 'inherit',
+					threshold: 128,
+					invert: false,
+					shape: 'rect',
+					fill: 'black',
+					stroke: 'none',
+					strokeWidth: 0,
+					radius: 0
+				} as Layer,
+				baseText({
+					name: 'Name',
+					text: 'YOUR NAME',
+					x: 6,
+					y: 4,
+					width: 156,
+					height: 24,
+					fontSize: 22,
+					font: "'Phantom Sans', sans-serif",
+					weight: 700
+				}),
+				baseLogo({ name: 'OUTPOST', src: '/logos/outpost-banner.png', x: 6, y: 32, width: 148, height: 38 }),
+				baseLogo({ name: 'Open Sauce', src: '/logos/open-sauce.png', x: 110, y: 74, width: 38, height: 48, dither: 'floyd' }),
+				baseLogo({ name: 'Hack Club', src: '/logos/hackclub-flag.png', x: 4, y: 88, width: 94, height: 33 })
+			]
+		})
+	},
+	{
 		id: 'raygen',
 		label: 'Raygen Rupe',
 		build: () => ({

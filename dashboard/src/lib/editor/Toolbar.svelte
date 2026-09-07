@@ -2,6 +2,7 @@
 	import { badge } from '$lib/usb/badge.svelte';
 	import { exportWireImage } from './exportWire';
 	import { BADGE_W, BADGE_H } from './types';
+	import { editor } from './store.svelte';
 
 	type ToastKind = 'info' | 'good' | 'bad';
 	let { bits, notify }: { bits: Uint8Array; notify: (msg: string, kind?: ToastKind) => void } =
@@ -11,6 +12,16 @@
 	let busy = $state<string | null>(null);
 
 	const connected = $derived(badge.status === 'connected');
+
+	let photoInput: HTMLInputElement;
+	async function onPhoto(e: Event) {
+		const f = (e.target as HTMLInputElement).files?.[0];
+		if (f) {
+			await editor.uploadPhoto(f);
+			notify('Photo added — tune the dither in the Inspector', 'good');
+		}
+		(e.target as HTMLInputElement).value = '';
+	}
 
 	async function send() {
 		if (!connected || sending) return;
@@ -88,6 +99,13 @@
 
 <div class="toolbar">
 	<div class="grp">
+		<span class="eyebrow">Edit</span>
+		<div class="btns">
+			<button disabled={!editor.canUndo} onclick={() => editor.undo()} title="Undo (Ctrl+Z)">↶ Undo</button>
+			<button disabled={!editor.canRedo} onclick={() => editor.redo()} title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
+		</div>
+	</div>
+	<div class="grp">
 		<span class="eyebrow">Device</span>
 		<div class="btns">
 			<button class="primary" disabled={!connected || sending} onclick={send}>
@@ -108,6 +126,13 @@
 			<button onclick={downloadBin}>↓ .bin (4736)</button>
 		</div>
 	</div>
+	<div class="grp">
+		<span class="eyebrow">Photo</span>
+		<div class="btns">
+			<button class="primary" onclick={() => photoInput.click()}>⇪ Upload photo</button>
+		</div>
+	</div>
+	<input bind:this={photoInput} type="file" accept="image/*" onchange={onPhoto} style="display:none" />
 </div>
 
 <style>

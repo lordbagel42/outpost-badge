@@ -54,6 +54,11 @@ class EditorStore {
 
 	#images = new Map<string, HTMLImageElement>();
 	#loading = new Set<string>();
+	canUndo = $state(false);
+	canRedo = $state(false);
+	#undo: string[] = [];
+	#redo: string[] = [];
+	#baseline = '';
 
 	get selected(): Layer | null {
 		return this.project.layers.find((l) => l.id === this.selectedId) ?? null;
@@ -297,6 +302,7 @@ class EditorStore {
 	// ---- persistence ----
 	persist = debounce(() => {
 		if (!browser) return;
+		this.#record();
 		try {
 			localStorage.setItem(STORAGE_KEY, JSON.stringify($state.snapshot(this.project)));
 		} catch {
@@ -317,6 +323,7 @@ class EditorStore {
 					this.project = p;
 					this.selectedId = p.layers[p.layers.length - 1]?.id ?? null;
 					this.preloadAll();
+				this.#baseline = this.#snapshot();
 					return;
 				}
 			}
@@ -359,6 +366,84 @@ class EditorStore {
 		this.project = emptyProject();
 		this.selectedId = null;
 		this.persist();
+	}
+
+	// ---- undo / redo ----
+	#snapshot(): string {
+		return JSON.stringify($state.snapshot(this.project));
+	}
+	#record() {
+		const snap = this.#snapshot();
+		if (snap === this.#baseline) return;
+		if (this.#baseline) {
+			this.#undo.push(this.#baseline);
+			if (this.#undo.length > 100) this.#undo.shift();
+		}
+		this.#redo = [];
+		this.#baseline = snap;
+		this.canUndo = this.#undo.length > 0;
+		this.canRedo = false;
+	}
+	#restore(json: string) {
+		const p = JSON.parse(json) as Project;
+		this.project = p;
+		if (!p.layers.find((l) => l.id === this.selectedId))
+			this.selectedId = p.layers[p.layers.length - 1]?.id ?? null;
+		this.#baseline = json;
+		this.preloadAll();
+		this.loadTick++;
+		if (browser) {
+			try {
+				localStorage.setItem(STORAGE_KEY, json);
+			} catch {
+				/* */
+			}
+		}
+	}
+	undo() {
+		if (!this.#undo.length) return;
+		this.#redo.push(this.#snapshot());
+		this.#restore(this.#undo.pop()!);
+		this.canUndo = this.#undo.length > 0;
+		this.canRedo = true;
+	}
+	redo() {
+		if (!this.#redo.length) return;
+		this.#undo.push(this.#snapshot());
+		this.#restore(this.#redo.pop()!);
+		this.canRedo = this.#redo.length > 0;
+		this.canUndo = true;
+	}
+
+	/** Replace the selected image/logo layer's picture, or drop a new photo into
+	 *  the avatar slot (right-hand 128x128) if nothing suitable is selected. */
+	async uploadPhoto(file: File) {
+		const dataUrl = await fileToDataUrl(file);
+		const sel = this.selected;
+		if (sel && (sel.type === 'image' || sel.type === 'logo')) {
+			(sel as ImageLayer).src = dataUrl;
+			this.ensureImage(dataUrl);
+			this.persist();
+			return sel.id;
+		}
+		const l: ImageLayer = {
+			...commonDefaults(),
+			id: uid('img'),
+			type: 'image',
+			name: 'Photo',
+			x: 168,
+			y: 0,
+			width: 128,
+			height: 128,
+			src: dataUrl,
+			fit: 'fill',
+			brightness: 0,
+			contrast: 0,
+			gamma: 1,
+			dither: 'floyd'
+		};
+		this.ensureImage(dataUrl);
+		return this.#add(l);
 	}
 }
 

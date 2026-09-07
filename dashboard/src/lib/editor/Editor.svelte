@@ -29,6 +29,21 @@
 
 	onMount(() => {
 		editor.load();
+		const onKey = (e: KeyboardEvent) => {
+			const t = e.target as HTMLElement | null;
+			if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+			if (!(e.ctrlKey || e.metaKey)) return;
+			const k = e.key.toLowerCase();
+			if (k === 'z' && !e.shiftKey) {
+				e.preventDefault();
+				editor.undo();
+			} else if ((k === 'z' && e.shiftKey) || k === 'y') {
+				e.preventDefault();
+				editor.redo();
+			}
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
 	});
 
 	// ---- toasts ----
